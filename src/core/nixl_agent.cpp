@@ -21,6 +21,7 @@
 #include <numeric>
 
 #include "nixl.h"
+#include "nixl_service_chain.h"
 #include "serdes/serdes.h"
 #include "backend/backend_engine.h"
 #include "transfer_request.h"
@@ -851,6 +852,7 @@ nixlAgent::createXferReq(const nixl_xfer_op_t &operation,
                          const nixl_xfer_dlist_t &local_descs,
                          const nixl_xfer_dlist_t &remote_descs,
                          const std::string &remote_agent,
+                         nixlServiceChain* serviceChain,
                          nixlXferReqH* &req_hndl,
                          const nixl_opt_args_t* extra_params) const {
     nixl_status_t     ret1, ret2;
@@ -964,6 +966,7 @@ nixlAgent::createXferReq(const nixl_xfer_op_t &operation,
     handle->status = NIXL_ERR_NOT_POSTED;
     handle->notifMsg = opt_args.notifMsg;
     handle->hasNotif = opt_args.hasNotif;
+    handle->service_chain = serviceChain;
 
     if (data->telemetryEnabled) {
         handle->telemetry.totalBytes = total_bytes;
@@ -1098,6 +1101,20 @@ nixlAgent::postXferReq(nixlXferReqH *req_hndl,
         return NIXL_ERR_BACKEND;
     }
 
+    // Apply service chain if present
+    if (req_hndl->service_chain != nullptr && req_hndl->service_chain->size() > 0) {
+        NIXL_INFO << "Applying service chain with " << req_hndl->service_chain->size() << " service(s)";
+        
+        nixlServiceChainStatus chain_status = req_hndl->service_chain->operateServices(req_hndl->backendOp, *req_hndl->initiatorDescs, nullptr);
+        if (chain_status != nixlServiceChainStatus::SUCCESS) {
+            NIXL_ERROR << "Service chain processing failed with status " << static_cast<int>(chain_status);
+            data->addErrorTelemetry(NIXL_ERR_BACKEND);
+            return NIXL_ERR_BACKEND;
+        }
+        
+        NIXL_INFO << "Service chain processing completed successfully";
+    }
+    
     // If status is not NIXL_IN_PROG we can repost,
     req_hndl->status = req_hndl->engine->postXfer(req_hndl->backendOp,
                                                   *req_hndl->initiatorDescs,

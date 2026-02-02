@@ -26,6 +26,12 @@
 #include <mutex>
 #include "backend/backend_plugin.h"
 #include "telemetry/telemetry_plugin.h"
+#include "service/service_plugin.h"
+
+// Forward declarations for service plugins
+class nixlServiceEngine;
+struct nixlServiceInitParams;
+class nixlServicePlugin;
 
 // Forward declarations
 class nixlBackendEngine;
@@ -97,6 +103,30 @@ private:
     nixlTelemetryPlugin *plugin_;
 };
 
+// Service plugin handle
+class nixlServicePluginHandle : public nixlPluginHandle {
+public:
+    nixlServicePluginHandle(void *handle, nixlServicePlugin *plugin);
+    ~nixlServicePluginHandle();
+
+    nixlServiceEngine* createEngine(const nixlServiceInitParams* init_params) const;
+    void destroyEngine(nixlServiceEngine* engine) const;
+    const char *
+    getName() const override;
+    const char *
+    getVersion() const override;
+    nixl_b_params_t getServiceOptions() const;
+    nixl_mem_list_t getServiceMems() const;
+
+private:
+    nixlServicePlugin *plugin_;
+};
+
+struct nixlServiceStaticPluginInfo {
+    const char* name;
+    nixlStaticServicePluginCreatorFunc createFunc;
+};
+
 typedef std::shared_ptr<const nixlPluginHandle> (
     *nixlPluginLoaderFunc)(void *handle, const std::string &plugin_path);
 
@@ -136,6 +166,18 @@ public:
     std::shared_ptr<const nixlTelemetryPluginHandle>
     getTelemetryPlugin(const nixl_telemetry_plugin_t &plugin_name);
 
+    // Load a specific service plugin
+    std::shared_ptr<const nixlServicePluginHandle>
+    loadServicePlugin(const std::string &plugin_name);
+
+    // Unload service plugin
+    void
+    unloadServicePlugin(const std::string &plugin_name);
+
+    // Get a service plugin handle
+    std::shared_ptr<const nixlServicePluginHandle>
+    getServicePlugin(const std::string &plugin_name);
+
     // Get all loaded backend plugin names
     std::vector<nixl_backend_t>
     getLoadedBackendPluginNames();
@@ -143,6 +185,10 @@ public:
     // Get all loaded telemetry plugin names
     std::vector<nixl_telemetry_plugin_t>
     getLoadedTelemetryPluginNames();
+
+    // Get all loaded service plugin names
+    std::vector<std::string>
+    getLoadedServicePluginNames();
 
     // Add a plugin directory
     void
@@ -155,14 +201,20 @@ public:
     const std::vector<nixlTelemetryStaticPluginInfo> &
     getTelemetryStaticPlugins();
 
+    const std::vector<nixlServiceStaticPluginInfo> &
+    getServiceStaticPlugins();
+
 private:
     std::map<nixl_backend_t, std::shared_ptr<const nixlBackendPluginHandle>>
         loaded_backend_plugins_;
     std::map<nixl_telemetry_plugin_t, std::shared_ptr<const nixlTelemetryPluginHandle>>
         loaded_telemetry_plugins_;
+    std::map<std::string, std::shared_ptr<const nixlServicePluginHandle>>
+        loaded_service_plugins_;
     std::vector<std::string> plugin_dirs_;
     std::vector<nixlBackendStaticPluginInfo> backend_static_plugins_;
     std::vector<nixlTelemetryStaticPluginInfo> telemetry_static_plugins_;
+    std::vector<nixlServiceStaticPluginInfo> service_static_plugins_;
     std::mutex lock;
 
     void
@@ -172,6 +224,8 @@ private:
     void
     registerTelemetryStaticPlugin(const std::string &name,
                                   nixlTelemetryStaticPluginCreatorFunc creator);
+    void
+    registerServiceStaticPlugin(const std::string_view &name, nixlStaticServicePluginCreatorFunc creator);
 
     // Search a directory for plugins
     void
@@ -183,6 +237,9 @@ private:
 
     void
     discoverTelemetryPlugin(const std::string &filename);
+
+    void
+    discoverServicePlugin(const std::string &filename);
 
     std::shared_ptr<const nixlPluginHandle>
     loadPluginFromPath(const std::string &plugin_path, nixlPluginLoaderFunc loader);

@@ -120,4 +120,26 @@ if enabled_plugins.get('GPUNETIO')
     endif
 endif
 
+# KVTC service plugin - always available, no external dependencies
+if enabled_plugins.get('KVTC')
+    subdir('kvtc')
+endif
+
 subdir('telemetry')
+
+# Create a unified plugins directory for easier discovery during development
+# This creates symlinks from all plugin subdirectories to a common location
+# Note: This target depends on plugin libraries being built, so it will run after compilation
+unified_plugins_dir = meson.current_build_dir() / '../core/plugins'
+plugins_src_dir = meson.current_build_dir()
+
+custom_target('unified_plugins',
+    output: 'unified_plugins.stamp',
+    build_by_default: true,
+    command: ['sh', '-c', 
+              'mkdir -p ' + unified_plugins_dir + ' && ' +
+              'for d in ' + plugins_src_dir + '/*/; do ' +
+              'for f in "$d"*.so; do ' +
+              '[ -f "$f" ] && ln -sf "$f" ' + unified_plugins_dir + '/ || true; ' +
+              'done; done && touch @OUTPUT@']
+)

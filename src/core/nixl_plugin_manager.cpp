@@ -32,6 +32,7 @@ using lock_guard = const std::lock_guard<std::mutex>;
 
 const std::string backendPluginPrefix = "libplugin_";
 const std::string telemetryPluginPrefix = "libtelemetry_exporter_";
+const std::string servicePluginPrefix = "libnixl_service_";
 const std::string kPluginSuffix = ".so";
 
 // pluginHandle implementation
@@ -487,6 +488,7 @@ nixlPluginManager::discoverPluginsFromDir(const std::filesystem::path &dirpath) 
         std::string filename = entry.path().filename().string();
         discoverBackendPlugin(filename);
         discoverTelemetryPlugin(filename);
+        discoverServicePlugin(filename);
     }
 }
 
@@ -673,3 +675,177 @@ void nixlPluginManager::registerBuiltinPlugins() {
 #endif
     NIXL_REGISTER_STATIC_PLUGIN(Telemetry, BUFFER)
 }
+
+nixlServicePluginHandle::nixlServicePluginHandle(void *handle, nixlServicePlugin *plugin)
+    : nixlPluginHandle(handle), plugin_(plugin) {
+    NIXL_DEBUG << "Created service plugin handle for: " << getName();
+}
+
+nixlServicePluginHandle::~nixlServicePluginHandle() {
+    NIXL_DEBUG << "Destroying service plugin handle for: " << getName();
+    if (handle_) {
+        dlclose(handle_);
+    }
+}
+
+nixlServiceEngine*
+nixlServicePluginHandle::createEngine(const nixlServiceInitParams* init_params) const {
+    return plugin_->create_engine(init_params);
+}
+
+void
+nixlServicePluginHandle::destroyEngine(nixlServiceEngine* engine) const {
+    plugin_->destroy_engine(engine);
+}
+
+const char *
+nixlServicePluginHandle::getName() const {
+    return plugin_->get_plugin_name();
+}
+
+const char *
+nixlServicePluginHandle::getVersion() const {
+    return plugin_->get_plugin_version();
+}
+
+nixl_b_params_t
+nixlServicePluginHandle::getServiceOptions() const {
+    return plugin_->get_service_options();
+}
+
+nixl_mem_list_t
+nixlServicePluginHandle::getServiceMems() const {
+    return plugin_->get_service_mems();
+}
+
+std::shared_ptr<const nixlServicePluginHandle>
+nixlPluginManager::loadServicePlugin(const std::string &plugin_name) {
+    std::lock_guard<std::mutex> guard(lock);
+
+    // Check if already loaded
+    auto it = loaded_service_plugins_.find(plugin_name);
+    if (it != loaded_service_plugins_.end()) {
+        NIXL_DEBUG << "Service plugin " << plugin_name << " already loaded";
+        return it->second;
+    }
+
+    // Check static plugins first
+    for (const auto &static_plugin : service_static_plugins_) {
+        if (plugin_name == static_plugin.name) {
+            NIXL_INFO << "Loading static service plugin: " << plugin_name;
+            nixlServicePlugin *plugin = static_plugin.createFunc();
+            if (!plugin) {
+                NIXL_ERROR << "Failed to create static service plugin: " << plugin_name;
+                return nullptr;
+            }
+            auto handle = std::make_shared<nixlServicePluginHandle>(nullptr, plugin);
+            loaded_service_plugins_[plugin_name] = handle;
+            return handle;
+        }
+    }
+
+    // Try to load as dynamic plugin
+    auto loader = [](void *dlhandle, const std::string &path) -> std::shared_ptr<const nixlPluginHandle> {
+        auto init_func = (nixlServicePlugin * (*)()) dlsym(dlhandle, "nixl_service_plugin_init");
+        if (!init_func) {
+            NIXL_ERROR << "Failed to find nixl_service_plugin_init in " << path;
+            return nullptr;
+        }
+
+        nixlServicePlugin *plugin = init_func();
+        if (!plugin) {
+            NIXL_ERROR << "nixl_service_plugin_init returned nullptr for " << path;
+            return nullptr;
+        }
+
+        if (plugin->api_version != NIXL_SERVICE_PLUGIN_API_VERSION) {
+            NIXL_ERROR << "Service plugin API version mismatch for " << path
+                      << ": expected " << NIXL_SERVICE_PLUGIN_API_VERSION
+                      << ", got " << plugin->api_version;
+            return nullptr;
+        }
+
+        return std::make_shared<nixlServicePluginHandle>(dlhandle, plugin);
+    };
+
+    // Search for plugin in plugin directories
+    for (const auto &dir : plugin_dirs_) {
+        std::string plugin_path = composePluginPath(dir, "libnixl_service_", plugin_name);
+        if (access(plugin_path.c_str(), F_OK) == 0) {
+            auto handle = loadPluginFromPath(plugin_path, loader);
+            if (handle) {
+                auto service_handle = std::dynamic_pointer_cast<const nixlServicePluginHandle>(handle);
+                if (service_handle) {
+                    loaded_service_plugins_[plugin_name] = service_handle;
+                    NIXL_INFO << "Loaded service plugin: " << plugin_name << " from " << plugin_path;
+                    return service_handle;
+                }
+            }
+        }
+    }
+
+    NIXL_ERROR << "Failed to find service plugin: " << plugin_name;
+    return nullptr;
+}
+
+void
+nixlPluginManager::unloadServicePlugin(const std::string &plugin_name) {
+    std::lock_guard<std::mutex> guard(lock);
+    
+    auto it = loaded_service_plugins_.find(plugin_name);
+    if (it != loaded_service_plugins_.end()) {
+        NIXL_INFO << "Unloading service plugin: " << plugin_name;
+        loaded_service_plugins_.erase(it);
+    }
+}
+
+std::shared_ptr<const nixlServicePluginHandle>
+nixlPluginManager::getServicePlugin(const std::string &plugin_name) {
+    std::lock_guard<std::mutex> guard(lock);
+    
+    auto it = loaded_service_plugins_.find(plugin_name);
+    if (it != loaded_service_plugins_.end()) {
+        return it->second;
+    }
+    
+    return nullptr;
+}
+
+std::vector<std::string>
+nixlPluginManager::getLoadedServicePluginNames() {
+    std::lock_guard<std::mutex> guard(lock);
+    
+    std::vector<std::string> names;
+    names.reserve(loaded_service_plugins_.size());
+    
+    for (const auto &pair : loaded_service_plugins_) {
+        names.push_back(pair.first);
+    }
+    
+    return names;
+}
+
+const std::vector<nixlServiceStaticPluginInfo> &
+nixlPluginManager::getServiceStaticPlugins() {
+    return service_static_plugins_;
+}
+
+void
+nixlPluginManager::registerServiceStaticPlugin(const std::string_view &name,
+                                              nixlStaticServicePluginCreatorFunc creator) {
+    service_static_plugins_.push_back({std::string(name).c_str(), creator});
+    NIXL_INFO << "Registered static service plugin: " << name;
+}
+
+void
+nixlPluginManager::discoverServicePlugin(const std::string &filename) {
+    if (startsWith(filename, servicePluginPrefix) && endsWith(filename, kPluginSuffix.data())) {
+        std::string plugin_name = extractPluginName(filename, servicePluginPrefix);
+        
+        auto plugin = loadServicePlugin(plugin_name);
+        if (plugin) {
+            NIXL_INFO << "Discovered and loaded service plugin: " << plugin_name;
+        }
+    }
+}
+

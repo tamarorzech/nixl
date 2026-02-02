@@ -23,6 +23,7 @@
 #include "nixl.h"
 #include "test_utils.h"
 
+#include "nixl_service_chain.h"
 
 std::string agent1("Agent001");
 std::string agent2("Agent002");
@@ -198,11 +199,21 @@ main(int argc, char **argv) {
     req_dst_descs.addDesc(req_dst);
 
     std::cout << "Transfer request from " << addr1 << " to " << addr2 << "\n";
+    
+    // Show source data before transfer
+    uint64_t* src_data = (uint64_t*)((char*)addr1 + 16); // offset 16, where transfer starts
+    std::cout << "Source data before transfer (at offset 16): 0x" 
+              << std::hex << *src_data << std::dec << "\n";
+    
     nixlXferReqH *req_handle;
+
+    nixlServiceChain service_chain;
+    nixl_service_t service_type = "kvtc";
+    service_chain.addService(service_type);
 
     extra_params1.notifMsg = "notification";
     extra_params1.hasNotif = true;
-    ret1 = A1.createXferReq(NIXL_WRITE, req_src_descs, req_dst_descs, agent2, nullptr, req_handle, &extra_params1);
+    ret1 = A1.createXferReq(NIXL_WRITE, req_src_descs, req_dst_descs, agent2, &service_chain, req_handle, &extra_params1);
     nixl_exit_on_failure(ret1, "Failed to create Xfer Req", agent1);
 
     nixl_status_t status = A1.postXferReq(req_handle);
@@ -230,7 +241,23 @@ main(int argc, char **argv) {
     notif_map.clear();
     n_notifs = 0;
 
-    std::cout << "Transfer verified\n";
+    // Verify the actual data was transferred correctly
+    // src_data already declared above before transfer
+    uint64_t* dst_data = (uint64_t*)((char*)addr2 + dst_offset); // Destination at offset 8
+    uint64_t expected_value = 0xBBBBBBBBBBBBBBBB; // Original pattern (0xbb)
+    
+    std::cout << "\nVerifying transferred data:\n";
+    std::cout << "  Source data:   0x" << std::hex << *src_data << std::dec << "\n";
+    std::cout << "  Expected dest: 0x" << std::hex << expected_value << std::dec << "\n";
+    std::cout << "  Actual dest:   0x" << std::hex << *dst_data << std::dec << "\n";
+    
+    if (*dst_data == expected_value && *dst_data == *src_data) {
+        std::cout << "Transfer verified - Data transferred correctly!\n";
+    } else {
+        std::cout << "Transfer verification FAILED - Data mismatch!\n";
+        std::cout << "  Source != Dest or Data corrupted\n";
+        nixl_exit_on_failure(false, "Data verification failed", agent1);
+    }
 
     ret1 = A1.releaseXferReq(req_handle);
     nixl_exit_on_failure(ret1, "Failed to release Xfer Req", agent1);

@@ -22,13 +22,13 @@
 #include <optional>
 #include <chrono>
 
-
 /*** Forward declarations ***/
 class nixlSerDes;
 class nixlDlistH;
 class nixlBackendH;
 class nixlXferReqH;
 class nixlAgentData;
+class nixlServiceChain;
 
 
 /*** NIXL memory type, operation and status enums ***/
@@ -98,6 +98,11 @@ namespace nixlEnumStrings {
 using nixl_backend_t = std::string;
 
 /**
+ * @brief A typedef for a std::string to identify nixl services
+ */
+ using nixl_service_t = std::string;
+
+/**
  * @brief A typedef for a std::string to identify nixl telemetry plugins
  */
 using nixl_telemetry_plugin_t = std::string;
@@ -120,6 +125,12 @@ using nixl_mem_list_t = std::vector<nixl_mem_t>;
  *        to hold nixl_b_params_t .
  */
 using nixl_b_params_t = std::unordered_map<std::string, std::string>;
+
+/**
+ * @brief A typedef for a  std::unordered_map<std::string, std::string>
+ *        to hold nixl_s_params_t .
+ */
+ using nixl_s_params_t = std::unordered_map<std::string, std::string>;
 
 /**
  * @brief A typedef for a  std::unordered_map<std::string, std::vector<nixl_blob_t>>
@@ -172,6 +183,15 @@ struct nixlAgentOptionalArgs {
      *      makeConnection / prepXferDlist / makeXferReq / createXferReq / GetNotifs / GenNotif
      */
     std::vector<nixlBackendH*> backends;
+
+    /**
+     * @var serviceChain Service chain to specify an ordered list of service engines
+     *      to apply sequentially before a transfer. Used in createXferReq / makeXferReq.
+     *      Services are created via nixlService::createService() before the transfer.
+     *      The chain validates service order concerning memory type and service conditions.
+     */
+     // TODO: change to forward declaration and use pointer instead of object
+    nixlServiceChain* serviceChain;
 
     /**
      * @var notifMsg A message to be used in createXferReq / makeXferReq / postXferReq,
