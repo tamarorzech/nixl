@@ -14,32 +14,56 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
+/**
+ * @file nixl_service_example.cpp
+ * @brief Example demonstrating service chain with local/storage backends (POSIX, GDS, etc.)
+ * 
+ * This example shows how to use NIXL service chains with storage backends that only
+ * support local operations (supportsLocal() = true, supportsRemote() = false).
+ * 
+ * The example demonstrates:
+ * - WRITE operation: Transfer data from DRAM buffer to file
+ * - READ operation: Transfer data from file to DRAM buffer
+ * - Service chain application for both operations
+ * - Proper file descriptor handling for POSIX backend
+ * 
+ * Key differences from remote examples:
+ * - Single agent (no remote metadata exchange)
+ * - No notifications
+ * - Local-only transfers (source and destination on same agent)
+ * - Works with POSIX, GDS, HF3FS, and other storage backends
+ */
+
 #include <iostream>
 #include <cassert>
 #include <cstring>
-
+#include <cstdio>
+#include <vector>
+#include <algorithm>
 #include <sys/time.h>
+#include <fcntl.h>
+#include <unistd.h>
 
 #include "nixl.h"
 #include "test_utils.h"
-
 #include "nixl_service_chain.h"
 
-std::string agent1("Agent001");
-std::string agent2("Agent002");
+std::string agent_name("LocalAgent");
 
-void check_buf(void* buf, size_t len) {
-
-    // Do some checks on the data.
-    for(size_t i = 0; i<len; i++){
-        nixl_exit_on_failure((((uint8_t *)buf)[i] == 0xbb), "Data mismatch!", agent1);
+void check_buf(void* buf, size_t len, uint8_t expected_value) {
+    for(size_t i = 0; i < len; i++){
+        if (((uint8_t *)buf)[i] != expected_value) {
+            std::cerr << "Data mismatch at offset " << i 
+                      << ": expected 0x" << std::hex << (int)expected_value
+                      << ", got 0x" << (int)((uint8_t *)buf)[i] << std::dec << "\n";
+            nixl_exit_on_failure(false, "Data mismatch!", agent_name);
+        }
     }
 }
 
-bool equal_buf (void* buf1, void* buf2, size_t len) {
-
-    // Do some checks on the data.
-    for (size_t i = 0; i<len; i++)
+bool equal_buf(void* buf1, void* buf2, size_t len) {
+    for (size_t i = 0; i < len; i++)
         if (((uint8_t*) buf1)[i] != ((uint8_t*) buf2)[i])
             return false;
     return true;
@@ -48,231 +72,356 @@ bool equal_buf (void* buf1, void* buf2, size_t len) {
 void printParams(const nixl_b_params_t& params, const nixl_mem_list_t& mems) {
     if (params.empty()) {
         std::cout << "Parameters: (empty)" << std::endl;
-        return;
-    }
-
-    std::cout << "Parameters:" << std::endl;
-    for (const auto& pair : params) {
-        std::cout << "  " << pair.first << " = " << pair.second << std::endl;
+    } else {
+        std::cout << "Parameters:" << std::endl;
+        for (const auto& pair : params) {
+            std::cout << "  " << pair.first << " = " << pair.second << std::endl;
+        }
     }
 
     if (mems.empty()) {
         std::cout << "Mems: (empty)" << std::endl;
-        return;
-    }
-
-    std::cout << "Mems:" << std::endl;
-    for (const auto& elm : mems) {
-        std::cout << "  " << nixlEnumStrings::memTypeStr(elm) << std::endl;
+    } else {
+        std::cout << "Mems:" << std::endl;
+        for (const auto& elm : mems) {
+            std::cout << "  " << nixlEnumStrings::memTypeStr(elm) << std::endl;
+        }
     }
 }
 
-int
-main(int argc, char **argv) {
-    nixl_status_t ret1, ret2;
-    std::string ret_s1, ret_s2;
-
-    // Backend name can be provided as the first CLI argument; default to "UCX"
-    std::string backend = "UCX";
+int main(int argc, char **argv) {
+    nixl_status_t ret;
+    
+    // Backend name can be provided as the first CLI argument; default to "POSIX"
+    std::string backend = "POSIX";
     if (argc > 1) {
         backend = argv[1];
     }
 
-    // Example: assuming two agents running on the same machine,
-    // with separate memory regions in DRAM
+    std::cout << "========================================\n";
+    std::cout << "NIXL Local Service Chain Example\n";
+    std::cout << "Backend: " << backend << "\n";
+    std::cout << "Tests: WRITE (DRAM->FILE) + READ (FILE->DRAM)\n";
+    std::cout << "========================================\n\n";
 
-    nixlAgentConfig cfg(true);
-    nixl_b_params_t init1, init2;
-    nixl_mem_list_t mems1, mems2;
+    // Create agent with listener disabled (no remote operations needed)
+    nixlAgentConfig cfg(false);  // false = no listener thread
+    nixlAgent agent(agent_name, cfg);
 
-    // populate required/desired inits
-    nixlAgent A1(agent1, cfg);
-    nixlAgent A2(agent2, cfg);
-
+    // Get available plugins
     std::vector<nixl_backend_t> plugins;
-
-    ret1 = A1.getAvailPlugins(plugins);
-    nixl_exit_on_failure(ret1, "Failed to get available plugins", agent1);
+    ret = agent.getAvailPlugins(plugins);
+    nixl_exit_on_failure(ret, "Failed to get available plugins", agent_name);
 
     std::cout << "Available plugins:\n";
+    for (const auto& b : plugins)
+        std::cout << "  - " << b << "\n";
+    std::cout << "\n";
 
-    for (nixl_backend_t b: plugins)
-        std::cout << b << "\n";
+    // Check if requested backend is available
+    if (std::find(plugins.begin(), plugins.end(), backend) == plugins.end()) {
+        std::cerr << "ERROR: Backend '" << backend << "' not found!\n";
+        std::cerr << "Available backends listed above.\n";
+        return 1;
+    }
 
-    std::cout << "Using backend: " << backend << "\n";
-    ret1 = A1.getPluginParams(backend, mems1, init1);
-    ret2 = A2.getPluginParams(backend, mems2, init2);
+    // Get plugin parameters
+    nixl_b_params_t init_params;
+    nixl_mem_list_t mems;
+    ret = agent.getPluginParams(backend, mems, init_params);
+    nixl_exit_on_failure(ret, "Failed to get plugin params", agent_name);
 
-    nixl_exit_on_failure(ret1, "Failed to get plugin params", agent1);
-    nixl_exit_on_failure(ret2, "Failed to get plugin params", agent2);
+    std::cout << "Backend parameters:\n";
+    printParams(init_params, mems);
+    std::cout << "\n";
 
-    std::cout << "Params before init:\n";
-    printParams(init1, mems1);
-    printParams(init2, mems2);
+    // Create backend
+    nixlBackendH *backend_handle;
+    ret = agent.createBackend(backend, init_params, backend_handle);
+    nixl_exit_on_failure(ret, "Failed to create " + backend + " backend", agent_name);
 
-    nixlBackendH *bknd1, *bknd2;
-    ret1 = A1.createBackend(backend, init1, bknd1);
-    ret2 = A2.createBackend(backend, init2, bknd2);
+    nixl_opt_args_t extra_params;
+    extra_params.backends.push_back(backend_handle);
 
-    nixl_opt_args_t extra_params1, extra_params2;
-    extra_params1.backends.push_back(bknd1);
-    extra_params2.backends.push_back(bknd2);
+    std::cout << "Backend created successfully\n\n";
 
-    nixl_exit_on_failure(ret1, "Failed to create " + backend + " backend", agent1);
-    nixl_exit_on_failure(ret2, "Failed to create " + backend + " backend", agent2);
-
-    ret1 = A1.getBackendParams(bknd1, mems1, init1);
-    ret2 = A2.getBackendParams(bknd2, mems2, init2);
-
-    nixl_exit_on_failure(ret1, "Failed to get " + backend + " backend params", agent1);
-    nixl_exit_on_failure(ret2, "Failed to get " + backend + " backend params", agent2);
-
-    std::cout << "Params after init:\n";
-    printParams(init1, mems1);
-    printParams(init2, mems2);
-
-    // // One side gets to listen, one side to initiate. Same string is passed as the last 2 steps
-    // ret1 = A1->makeConnection(agent2, 0);
-    // ret2 = A2->makeConnection(agent1, 1);
-
-    // assert (ret1 == NIXL_SUCCESS);
-    // assert (ret2 == NIXL_SUCCESS);
-
-    // User allocates memories, and passes the corresponding address
-    // and length to register with the backend
-    nixlBlobDesc buff1, buff2, buff3;
-    nixl_reg_dlist_t dlist1(DRAM_SEG), dlist2(DRAM_SEG);
-    size_t len = 256;
-    void* addr1 = calloc(1, len);
-    void* addr2 = calloc(1, len);
-
-    memset(addr1, 0xbb, len);
-    memset(addr2, 0, len);
-
-    buff1.addr   = (uintptr_t) addr1;
-    buff1.len    = len;
-    buff1.devId = 0;
-    dlist1.addDesc(buff1);
-
-    buff2.addr   = (uintptr_t) addr2;
-    buff2.len    = len;
-    buff2.devId = 0;
-    dlist2.addDesc(buff2);
-
-    // dlist1.print();
-    // dlist2.print();
-
-    ret1 = A1.registerMem(dlist1, &extra_params1);
-    ret2 = A2.registerMem(dlist2, &extra_params2);
-    nixl_exit_on_failure(ret1, "Failed to register memory", agent1);
-    nixl_exit_on_failure(ret2, "Failed to register memory", agent2);
-
-    std::string meta1;
-    ret1 = A1.getLocalMD(meta1);
-    std::string meta2;
-    ret2 = A2.getLocalMD(meta2);
-    nixl_exit_on_failure(ret1, "Failed to get local MD", agent1);
-    nixl_exit_on_failure(ret2, "Failed to get local MD", agent2);
-
-    std::cout << "Agent1's Metadata: " << meta1 << "\n";
-    std::cout << "Agent2's Metadata: " << meta2 << "\n";
-
-    ret1 = A1.loadRemoteMD (meta2, ret_s1);
-
-    nixl_exit_on_failure(ret1, "Failed to load remote MD", agent1);
-
-    size_t req_size = 8;
-    size_t dst_offset = 8;
-
-    nixl_xfer_dlist_t req_src_descs (DRAM_SEG);
-    nixlBasicDesc req_src;
-    req_src.addr     = (uintptr_t) (((char*) addr1) + 16); //random offset
-    req_src.len      = req_size;
-    req_src.devId   = 0;
-    req_src_descs.addDesc(req_src);
-
-    nixl_xfer_dlist_t req_dst_descs (DRAM_SEG);
-    nixlBasicDesc req_dst;
-    req_dst.addr   = (uintptr_t) ((char*) addr2) + dst_offset; //random offset
-    req_dst.len    = req_size;
-    req_dst.devId = 0;
-    req_dst_descs.addDesc(req_dst);
-
-    std::cout << "Transfer request from " << addr1 << " to " << addr2 << "\n";
+    // POSIX backend: Local=DRAM, Remote=FILE
+    // Allocate DRAM buffer (source)
+    size_t buffer_size = 1024;
+    void* src_buffer = calloc(1, buffer_size);
+    if (!src_buffer) {
+        std::cerr << "Failed to allocate source buffer\n";
+        return 1;
+    }
+    memset(src_buffer, 0xAA, buffer_size);
     
-    // Show source data before transfer
-    uint64_t* src_data = (uint64_t*)((char*)addr1 + 16); // offset 16, where transfer starts
-    std::cout << "Source data before transfer (at offset 16): 0x" 
-              << std::hex << *src_data << std::dec << "\n";
+    // Create and open destination file
+    std::string dst_file_path = "/tmp/nixl_dst_test_file.bin";
     
-    nixlXferReqH *req_handle;
+    // Open file with O_CREAT to create if doesn't exist, O_RDWR for read/write
+    int dst_fd = open(dst_file_path.c_str(), O_CREAT | O_RDWR | O_TRUNC, 0644);
+    if (dst_fd < 0) {
+        std::cerr << "Failed to open destination file: " << dst_file_path << "\n";
+        free(src_buffer);
+        return 1;
+    }
+    
+    // Pre-allocate file with zeros using write
+    std::vector<uint8_t> zeros(buffer_size, 0x00);
+    ssize_t written = write(dst_fd, zeros.data(), buffer_size);
+    if (written != (ssize_t)buffer_size) {
+        std::cerr << "Failed to write initial data to file\n";
+        close(dst_fd);
+        free(src_buffer);
+        return 1;
+    }
+    
+    std::cout << "Allocated resources:\n";
+    std::cout << "  Source (DRAM):      " << src_buffer << " (size: " << buffer_size << " bytes, pattern: 0xAA)\n";
+    std::cout << "  Destination (FILE): " << dst_file_path << " (fd: " << dst_fd << ", size: " << buffer_size << " bytes, pattern: 0x00)\n\n";
 
+    // Register source memory (DRAM)
+    nixl_reg_dlist_t reg_list_src(DRAM_SEG);
+    nixlBlobDesc src_desc;
+    src_desc.addr = (uintptr_t)src_buffer;
+    src_desc.len = buffer_size;
+    src_desc.devId = 0;
+    reg_list_src.addDesc(src_desc);
+    
+    // Register destination file (FILE)
+    nixl_reg_dlist_t reg_list_dst(FILE_SEG);
+    nixlBlobDesc dst_desc;
+    dst_desc.addr = 0;  // Not used for registration
+    dst_desc.len = buffer_size;
+    dst_desc.devId = dst_fd;  // File descriptor!
+    dst_desc.metaInfo = dst_file_path;  // File path for query operations
+    reg_list_dst.addDesc(dst_desc);
+
+    ret = agent.registerMem(reg_list_src, &extra_params);
+    nixl_exit_on_failure(ret, "Failed to register source memory", agent_name);
+    
+    ret = agent.registerMem(reg_list_dst, &extra_params);
+    nixl_exit_on_failure(ret, "Failed to register destination memory", agent_name);
+
+    std::cout << "Memory registered with backend\n\n";
+
+    // Create service chain (will be applied for storage backends only)
     nixlServiceChain service_chain;
-    nixl_service_t service_type = "kvtc";
-    service_chain.addService(service_type);
-
-    extra_params1.notifMsg = "notification";
-    extra_params1.hasNotif = true;
-    ret1 = A1.createXferReq(NIXL_WRITE, req_src_descs, req_dst_descs, agent2, &service_chain, req_handle, &extra_params1);
-    nixl_exit_on_failure(ret1, "Failed to create Xfer Req", agent1);
-
-    nixl_status_t status = A1.postXferReq(req_handle);
-    nixl_exit_on_failure((status >= NIXL_SUCCESS), "Failed to post Xfer Req", agent1);
-
-    std::cout << "Transfer was posted\n";
-
-    nixl_notifs_t notif_map;
-    int n_notifs = 0;
-
-    while (status != NIXL_SUCCESS || n_notifs == 0) {
-        if (status != NIXL_SUCCESS) status = A1.getXferStatus(req_handle);
-        if (n_notifs == 0) ret2 = A2.getNotifs(notif_map);
-        nixl_exit_on_failure((status >= NIXL_SUCCESS), "Failed to post Xfer Req", agent1);
-        nixl_exit_on_failure(ret2, "Failed to get notifs", agent2);
-        n_notifs = notif_map.size();
-    }
-
-    std::vector<std::string> agent1_notifs = notif_map[agent1];
-    nixl_exit_on_failure((agent1_notifs.size() == 1), "Incorrect notif size", agent1);
-    nixl_exit_on_failure(
-        (agent1_notifs.front() == "notification"), "Incorrect notification", agent1);
-
-    notif_map[agent1].clear(); // Redundant, for testing
-    notif_map.clear();
-    n_notifs = 0;
-
-    // Verify the actual data was transferred correctly
-    // src_data already declared above before transfer
-    uint64_t* dst_data = (uint64_t*)((char*)addr2 + dst_offset); // Destination at offset 8
-    uint64_t expected_value = 0xBBBBBBBBBBBBBBBB; // Original pattern (0xbb)
+    nixl_service_t service_type = "kvtc";  // KVTC is a no-op service for testing
     
-    std::cout << "\nVerifying transferred data:\n";
-    std::cout << "  Source data:   0x" << std::hex << *src_data << std::dec << "\n";
-    std::cout << "  Expected dest: 0x" << std::hex << expected_value << std::dec << "\n";
-    std::cout << "  Actual dest:   0x" << std::hex << *dst_data << std::dec << "\n";
-    
-    if (*dst_data == expected_value && *dst_data == *src_data) {
-        std::cout << "Transfer verified - Data transferred correctly!\n";
+    std::cout << "Creating service chain...\n";
+    auto chain_status = service_chain.addService(service_type);
+    if (chain_status == nixlServiceChainStatus::SUCCESS) {
+        std::cout << "  Added service: " << service_type << "\n";
+        std::cout << "  Chain size: " << service_chain.size() << "\n\n";
     } else {
-        std::cout << "Transfer verification FAILED - Data mismatch!\n";
-        std::cout << "  Source != Dest or Data corrupted\n";
-        nixl_exit_on_failure(false, "Data verification failed", agent1);
+        std::cout << "  Warning: Failed to add service (status: " 
+                  << static_cast<int>(chain_status) << ")\n";
+        std::cout << "  Continuing without service chain...\n\n";
     }
 
-    ret1 = A1.releaseXferReq(req_handle);
-    nixl_exit_on_failure(ret1, "Failed to release Xfer Req", agent1);
+    // ========================================
+    // TEST WRITE OPERATION (DRAM -> FILE)
+    // ========================================
+    
+    std::cout << "========================================\n";
+    std::cout << "Testing WRITE operation (DRAM -> FILE)\n";
+    std::cout << "========================================\n\n";
+    
+    // Create transfer descriptors
+    size_t xfer_size = 256;  // Transfer 256 bytes
+    
+    // Source: DRAM buffer
+    nixl_xfer_dlist_t src_xfer_descs(DRAM_SEG);
+    nixlBasicDesc src_xfer;
+    src_xfer.addr = (uintptr_t)src_buffer;
+    src_xfer.len = xfer_size;
+    src_xfer.devId = 0;
+    src_xfer_descs.addDesc(src_xfer);
+    
+    // Destination: FILE (offset in file)
+    nixl_xfer_dlist_t dst_xfer_descs(FILE_SEG);
+    nixlBasicDesc dst_xfer;
+    dst_xfer.addr = 0;  // Offset in file (start of file)
+    dst_xfer.len = xfer_size;
+    dst_xfer.devId = dst_fd;  // File descriptor
+    dst_xfer_descs.addDesc(dst_xfer);
 
-    ret1 = A1.deregisterMem(dlist1, &extra_params1);
-    ret2 = A2.deregisterMem(dlist2, &extra_params2);
-    nixl_exit_on_failure(ret1, "Failed to deregister memory", agent1);
-    nixl_exit_on_failure(ret2, "Failed to deregister memory", agent2);
+    // Create transfer request (local operation)
+    nixlXferReqH *req_handle;
+    
+    std::cout << "Creating transfer request...\n";
+    std::cout << "  Operation: NIXL_WRITE (local copy)\n";
+    std::cout << "  Source: " << (void*)src_xfer.addr << "\n";
+    std::cout << "  Destination: " << (void*)dst_xfer.addr << "\n";
+    std::cout << "  Size: " << xfer_size << " bytes\n";
+    std::cout << "  Remote agent: " << agent_name << " (same agent for local ops)\n\n";
+    
+    // For local backends, remote_agent should be the same agent
+    ret = agent.createXferReq(NIXL_WRITE, src_xfer_descs, dst_xfer_descs, 
+                              agent_name,  // Same agent for local operations
+                              &service_chain, 
+                              req_handle, 
+                              &extra_params);
+    nixl_exit_on_failure(ret, "Failed to create transfer request", agent_name);
 
-    //only initiator should call invalidate
-    ret1 = A1.invalidateRemoteMD(agent2);
-    nixl_exit_on_failure(ret1, "Failed to invalidate remote MD", agent1);
+    // Post transfer request
+    std::cout << "Posting transfer request...\n";
+    nixl_status_t status = agent.postXferReq(req_handle);
+    nixl_exit_on_failure((status >= NIXL_SUCCESS), "Failed to post transfer request", agent_name);
 
-    free(addr1);
-    free(addr2);
+    std::cout << "Transfer posted, waiting for completion...\n";
 
-    std::cout << "Test done\n";
+    // Wait for transfer completion
+    while (status != NIXL_SUCCESS) {
+        status = agent.getXferStatus(req_handle);
+        nixl_exit_on_failure((status >= NIXL_SUCCESS), "Transfer failed", agent_name);
+    }
+
+    std::cout << "Transfer completed successfully!\n\n";
+
+    // ========================================
+    // TEST READ OPERATION (FILE -> DRAM)
+    // ========================================
+    
+    std::cout << "========================================\n";
+    std::cout << "Testing READ operation (FILE -> DRAM)\n";
+    std::cout << "========================================\n\n";
+    
+    // Allocate a new destination buffer for read operation
+    void* read_dst_buffer = calloc(1, buffer_size);
+    if (!read_dst_buffer) {
+        std::cerr << "Failed to allocate read destination buffer\n";
+        return 1;
+    }
+    memset(read_dst_buffer, 0x00, buffer_size);  // Initialize with zeros
+    
+    std::cout << "Allocated read destination buffer:\n";
+    std::cout << "  Address: " << read_dst_buffer << " (size: " << buffer_size << " bytes, pattern: 0x00)\n\n";
+    
+    // Register the new destination buffer
+    nixl_reg_dlist_t reg_list_read_dst(DRAM_SEG);
+    nixlBlobDesc read_dst_desc;
+    read_dst_desc.addr = (uintptr_t)read_dst_buffer;
+    read_dst_desc.len = buffer_size;
+    read_dst_desc.devId = 0;
+    reg_list_read_dst.addDesc(read_dst_desc);
+    
+    ret = agent.registerMem(reg_list_read_dst, &extra_params);
+    nixl_exit_on_failure(ret, "Failed to register read destination memory", agent_name);
+    
+    std::cout << "Memory registered with backend\n\n";
+    
+    // Create READ transfer descriptors
+    // For NIXL_READ with POSIX:
+    //   - local (first param) = DRAM buffer (where we read INTO)
+    //   - remote (second param) = FILE (where we read FROM)
+    
+    // Local: DRAM buffer (destination)
+    nixl_xfer_dlist_t read_local_descs(DRAM_SEG);
+    nixlBasicDesc read_local;
+    read_local.addr = (uintptr_t)read_dst_buffer;
+    read_local.len = xfer_size;
+    read_local.devId = 0;
+    read_local_descs.addDesc(read_local);
+    
+    // Remote: FILE (source)
+    nixl_xfer_dlist_t read_remote_descs(FILE_SEG);
+    nixlBasicDesc read_remote;
+    read_remote.addr = 0;  // Offset in file (start)
+    read_remote.len = xfer_size;
+    read_remote.devId = dst_fd;  // Same file descriptor
+    read_remote_descs.addDesc(read_remote);
+    
+    // Create READ transfer request
+    nixlXferReqH *read_req_handle;
+    
+    std::cout << "Creating READ transfer request...\n";
+    std::cout << "  Operation: NIXL_READ (FILE -> DRAM)\n";
+    std::cout << "  Local (DRAM): " << read_dst_buffer << "\n";
+    std::cout << "  Remote (FILE): offset 0, fd " << dst_fd << "\n";
+    std::cout << "  Size: " << xfer_size << " bytes\n\n";
+    
+    ret = agent.createXferReq(NIXL_READ, read_local_descs, read_remote_descs,
+                              agent_name,  // Same agent for local operations
+                              &service_chain,
+                              read_req_handle,
+                              &extra_params);
+    nixl_exit_on_failure(ret, "Failed to create READ transfer request", agent_name);
+    
+    // Post READ transfer request
+    std::cout << "Posting READ transfer request...\n";
+    status = agent.postXferReq(read_req_handle);
+    nixl_exit_on_failure((status >= NIXL_SUCCESS), "Failed to post READ transfer request", agent_name);
+    
+    std::cout << "READ transfer posted, waiting for completion...\n";
+    
+    // Wait for READ transfer completion
+    while (status != NIXL_SUCCESS) {
+        status = agent.getXferStatus(read_req_handle);
+        nixl_exit_on_failure((status >= NIXL_SUCCESS), "READ transfer failed", agent_name);
+    }
+    
+    std::cout << "READ transfer completed successfully!\n\n";
+    
+    // Verify READ transfer
+    std::cout << "Verifying READ transfer (FILE -> DRAM)...\n";
+    std::cout << "  Checking first " << xfer_size << " bytes...\n";
+    
+    bool read_correct = (memcmp(src_buffer, read_dst_buffer, xfer_size) == 0);
+    
+    if (read_correct) {
+        std::cout << "  ✓ READ verification PASSED\n";
+        std::cout << "  First 16 bytes of original source:  ";
+        for (size_t i = 0; i < 16; i++)
+            printf("%02X ", ((uint8_t*)src_buffer)[i]);
+        std::cout << "\n  First 16 bytes after READ from file: ";
+        for (size_t i = 0; i < 16; i++)
+            printf("%02X ", ((uint8_t*)read_dst_buffer)[i]);
+        std::cout << "\n\n";
+    } else {
+        std::cout << "  ✗ READ verification FAILED\n";
+    }
+    
+    nixl_exit_on_failure(read_correct, "Data mismatch after READ transfer", agent_name);
+    
+    // Release READ transfer request
+    ret = agent.releaseXferReq(read_req_handle);
+    nixl_exit_on_failure(ret, "Failed to release READ transfer request", agent_name);
+    
+    // Deregister read buffer memory
+    ret = agent.deregisterMem(reg_list_read_dst, &extra_params);
+    nixl_exit_on_failure(ret, "Failed to deregister read buffer memory", agent_name);
+    
+    // Free read buffer
+    free(read_dst_buffer);
+
+    // Cleanup
+    std::cout << "\n========================================\n";
+    std::cout << "Cleanup\n";
+    std::cout << "========================================\n\n";
+    
+    ret = agent.releaseXferReq(req_handle);
+    nixl_exit_on_failure(ret, "Failed to release WRITE transfer request", agent_name);
+
+    ret = agent.deregisterMem(reg_list_src, &extra_params);
+    nixl_exit_on_failure(ret, "Failed to deregister source memory", agent_name);
+    
+    ret = agent.deregisterMem(reg_list_dst, &extra_params);
+    nixl_exit_on_failure(ret, "Failed to deregister destination file", agent_name);
+
+    // Cleanup resources
+    close(dst_fd);  // Close file descriptor
+    free(src_buffer);
+    std::remove(dst_file_path.c_str());
+    std::cout << "Cleaned up resources (closed file, freed buffers, removed file)\n";
+
+    std::cout << "\n========================================\n";
+    std::cout << "All tests completed successfully!\n";
+    std::cout << "  ✓ WRITE transfer (DRAM -> FILE)\n";
+    std::cout << "  ✓ READ transfer (FILE -> DRAM)\n";
+    std::cout << "  ✓ Service chain applied\n";
+    std::cout << "========================================\n";
+    
+    return 0;
 }

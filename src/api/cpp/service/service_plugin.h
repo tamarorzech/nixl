@@ -51,9 +51,6 @@ public:
 // Macro to define exported C functions for the service plugin
 #define NIXL_SERVICE_PLUGIN_EXPORT __attribute__((visibility("default")))
 
-// Creator Function type for static service plugins
-typedef nixlServicePlugin* (*nixlStaticServicePluginCreatorFunc)();
-
 // Template for creating service plugins with minimal boilerplate
 template<typename EngineType> class nixlServicePluginCreator {
 public:
@@ -99,6 +96,7 @@ private:
 };
 
 // Creator Function type for static service plugins
+typedef nixlServicePlugin* (*nixlStaticServicePluginCreatorFunc)();
 
 // Plugin must implement these functions for dynamic loading
 // Note: extern "C" is required for dynamic loading to avoid C++ name mangling

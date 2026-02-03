@@ -966,7 +966,19 @@ nixlAgent::createXferReq(const nixl_xfer_op_t &operation,
     handle->status = NIXL_ERR_NOT_POSTED;
     handle->notifMsg = opt_args.notifMsg;
     handle->hasNotif = opt_args.hasNotif;
-    handle->service_chain = serviceChain;
+    
+    // Only apply service chain to storage backends (local-only)
+    if (serviceChain && serviceChain->size() > 0) {
+        if (handle->engine->supportsLocal() && !handle->engine->supportsRemote()) {
+            handle->service_chain = serviceChain;
+            NIXL_DEBUG << "Service chain assigned to storage backend '" << handle->engine->getType() 
+                       << "' with " << serviceChain->size() << " service(s)";
+        } else {
+            NIXL_ERROR_FUNC << "service chain is not supported for remote backends";
+            data->addErrorTelemetry(NIXL_ERR_NOT_ALLOWED);
+            return NIXL_ERR_NOT_ALLOWED;
+        }
+    }
 
     if (data->telemetryEnabled) {
         handle->telemetry.totalBytes = total_bytes;
