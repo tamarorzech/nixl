@@ -231,6 +231,8 @@ class nixlAgent {
          * @param  local_descs    Local descriptor list
          * @param  remote_descs   Remote (or loopback) descriptor list
          * @param  remote_agent   Remote (or self) agent name for accessing the remote (local) data
+         * @param  service_chain   Service chain to be used for the transfer
+         * @param  processed_local_descs Local descriptor list for out of place transfer
          * @param  req_hndl [out] Transfer request handle output
          * @param  extra_params   Optional extra parameters used in creating a transfer request
          * @return nixl_status_t  Error code if call was not successful
@@ -240,7 +242,8 @@ class nixlAgent {
                        const nixl_xfer_dlist_t &local_descs,
                        const nixl_xfer_dlist_t &remote_descs,
                        const std::string &remote_agent,
-                       nixlServiceChain* serviceChain,
+                       nixlServiceChain* service_chain,
+                       const nixl_xfer_dlist_t *processed_local_descs,
                        nixlXferReqH* &req_hndl,
                        const nixl_opt_args_t* extra_params = nullptr) const;
 

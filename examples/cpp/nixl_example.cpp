@@ -202,7 +202,7 @@ main(int argc, char **argv) {
 
     extra_params1.notifMsg = "notification";
     extra_params1.hasNotif = true;
-    ret1 = A1.createXferReq(NIXL_WRITE, req_src_descs, req_dst_descs, agent2, nullptr, req_handle, &extra_params1);
+    ret1 = A1.createXferReq(NIXL_WRITE, req_src_descs, req_dst_descs, agent2, nullptr, nullptr, req_handle, &extra_params1);
     nixl_exit_on_failure(ret1, "Failed to create Xfer Req", agent1);
 
     nixl_status_t status = A1.postXferReq(req_handle);

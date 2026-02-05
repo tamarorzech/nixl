@@ -53,7 +53,8 @@ public:
      * @return Always returns NIXL_SUCCESS
      */
     nixl_status_t processData(const nixl_xfer_op_t &operation,
-                              const std::vector<nixlBlobDesc> &data_descs) override;
+                              const std::vector<nixlBlobDesc> &data_descs,
+                              const std::vector<nixlBlobDesc> &processed_data_descs) override;
 };
 
 #endif // __KVTC_SERVICE_H

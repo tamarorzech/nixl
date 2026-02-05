@@ -27,15 +27,10 @@
 #include "nixl_descriptors.h"
 #include "nixl_log.h"
 
-// Service operation flags
-enum nixl_service_flags_t {
-    NIXL_SERVICE_INPLACE = 1 << 0,      // Operate in-place (no temporary buffer)
-};
-
 // Initialization parameters for service engine
 struct nixlServiceInitParams {
     nixl_service_t type;                // Service type
-    uint32_t flags;                     // Service flags (in-place)
+    uint32_t flags;                     // Service flags
     const nixl_b_params_t* customParams; // Custom parameters
 };
 
@@ -44,10 +39,10 @@ class nixlServiceEngine {
 private:
     nixl_service_t serviceType_;
     nixl_b_params_t customParams_;
-    uint32_t flags_;
 
 protected:
     bool initErr = false;
+    uint32_t flags_;
 
     [[nodiscard]] nixl_status_t
     setInitParam(const std::string &key, const std::string &value) {
@@ -97,7 +92,8 @@ public:
 
     // Process data buffers based on operation
     virtual nixl_status_t processData(const nixl_xfer_op_t &operation,
-                                     const std::vector<nixlBlobDesc> &data_descs) = 0;
+                                     const std::vector<nixlBlobDesc> &data_descs,
+                                     const std::vector<nixlBlobDesc> &processed_data_descs) = 0;
 
 };
 

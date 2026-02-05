@@ -24,7 +24,9 @@
 #include "plugin_manager.h"
 #include <algorithm>
 
-nixlServiceChainStatus nixlServiceChain::addService(nixl_service_t service) {
+nixlServiceChainStatus nixlServiceChain::addService(nixl_service_t service,
+                                                     uint32_t flags,
+                                                     const nixl_s_params_t* init_custom_params) {
     // Validate input parameter
     if (service.empty()) {
         NIXL_ERROR << "Cannot add service with empty name";
@@ -43,8 +45,8 @@ nixlServiceChainStatus nixlServiceChain::addService(nixl_service_t service) {
     // Create init params for the service engine
     nixlServiceInitParams init_params;
     init_params.type = service;
-    init_params.customParams = nullptr;  // No custom params for now
-    init_params.flags = 0;
+    init_params.flags = flags;
+    init_params.customParams = const_cast<nixl_b_params_t *>(init_custom_params);
     
     // Create the service engine
     nixlServiceEngine* engine = plugin_handle->createEngine(&init_params);
@@ -191,6 +193,62 @@ nixlServiceChainStatus nixlServiceChain::validateRemoval(std::vector<nixlService
 
 // validateChain() is now replaced by isValid() inline method in the header
 
+/**
+ * @brief Helper function to execute the service chain on blob descriptors
+ * 
+ * @param operation The operation type (READ/WRITE)
+ * @param input_blob_descs Input blob descriptors
+ * @param output_blob_descs Output blob descriptors (may point to same as input for in-place)
+ * @param is_inplace Whether to process in-place
+ * @return nixlServiceChainStatus Status of the operation
+ */
+nixlServiceChainStatus nixlServiceChain::executeServiceChain(
+    const nixl_xfer_op_t operation,
+    std::vector<nixlBlobDesc>& input_blob_descs,
+    std::vector<nixlBlobDesc>& output_blob_descs,
+    bool is_inplace) {
+    
+    bool is_first_service = true;
+    std::vector<nixlBlobDesc>* current_input = &input_blob_descs;
+    std::vector<nixlBlobDesc>* current_output = nullptr;
+
+    for (auto service : services_) {
+        // Determine output buffer for this service
+        if (is_inplace) {
+            // In-place: input and output are the same
+            if (!service->engine->supportsInplace()) {
+                NIXL_ERROR << "Service '" << service->getType() 
+                          << "' does not support in-place operation";
+                return nixlServiceChainStatus::INVALID_PARAM;
+            }
+            current_output = current_input;
+        } else {
+            // Out-of-place: use output_blob_descs as output
+            current_output = &output_blob_descs;
+        }
+        
+        // Process data through this service
+        nixl_status_t status = service->engine->processData(
+            operation, *current_input, *current_output
+        );
+        
+        if (status != NIXL_SUCCESS) {
+            NIXL_ERROR << "Service '" << service->getType() 
+                      << "' processing failed with status " << status;
+            return nixlServiceChainStatus::OPERATION_FAILED;
+        }
+        
+        // For out-of-place chain: after first service, output becomes input for next
+        if (!is_inplace && is_first_service) {
+            current_input = &output_blob_descs;
+        }
+        
+        is_first_service = false;
+    }
+    
+    return nixlServiceChainStatus::SUCCESS;
+}
+
 nixlServiceChainStatus nixlServiceChain::operateServices(const nixl_xfer_op_t operation, const nixl_xfer_dlist_t& input_buffers,
                                                          nixl_xfer_dlist_t* output_buffers) {
     // Validate chain before operating
@@ -223,17 +281,22 @@ nixlServiceChainStatus nixlServiceChain::operateServices(const nixl_xfer_op_t op
         // Create BlobDesc from BasicDesc (no metadata for basic descriptors)
         blob_descs.emplace_back(desc.addr, desc.len, desc.devId, nixl_blob_t{});
     }
+
+    // Prepare output buffers (convert from dlist if provided, or process in-place)
+    bool is_inplace = (output_buffers == nullptr);
+    std::vector<nixlBlobDesc> processed_blob_descs;
     
-    // Execute each service in the chain
-    for (auto service : services_) {
-        nixl_status_t status = service->engine->processData(operation, blob_descs);
-        if (status != NIXL_SUCCESS) {
-            NIXL_ERROR << "Service '" << service->getType() << "' processing failed with status " << status;
-            return nixlServiceChainStatus::OPERATION_FAILED;
+    if (!is_inplace) {
+        processed_blob_descs.reserve(output_buffers->descCount());
+        for (int i = 0; i < output_buffers->descCount(); i++) {
+            const auto& desc = (*output_buffers)[i];
+            // Create BlobDesc from BasicDesc (no metadata for basic descriptors)
+            processed_blob_descs.emplace_back(desc.addr, desc.len, desc.devId, nixl_blob_t{});
         }
     }
-               
-    return nixlServiceChainStatus::SUCCESS;
+    
+    // Execute the service chain
+    return executeServiceChain(operation, blob_descs, processed_blob_descs, is_inplace);
 }
 
 nixlServiceChainStatus nixlServiceChain::operateServices(const nixl_xfer_op_t operation,const nixl_meta_dlist_t& input_buffers,
@@ -270,14 +333,19 @@ nixlServiceChainStatus nixlServiceChain::operateServices(const nixl_xfer_op_t op
         blob_descs.emplace_back(desc.addr, desc.len, desc.devId, nixl_blob_t{});
     }
     
-    // Execute each service in the chain
-    for (auto service : services_) {
-        nixl_status_t status = service->engine->processData(operation, blob_descs);
-        if (status != NIXL_SUCCESS) {
-            NIXL_ERROR << "Service '" << service->getType() << "' processing failed with status " << status;
-            return nixlServiceChainStatus::OPERATION_FAILED;
+    // Prepare output buffers (convert from dlist if provided, or process in-place)
+    bool is_inplace = (output_buffers == nullptr);
+    std::vector<nixlBlobDesc> processed_blob_descs;
+    
+    if (!is_inplace) {
+        processed_blob_descs.reserve(output_buffers->descCount());
+        for (int i = 0; i < output_buffers->descCount(); i++) {
+            const auto& desc = (*output_buffers)[i];
+            // Create BlobDesc from MetaDesc (no metadata extraction for now)
+            processed_blob_descs.emplace_back(desc.addr, desc.len, desc.devId, nixl_blob_t{});
         }
     }
-               
-    return nixlServiceChainStatus::SUCCESS;
+    
+    // Execute the service chain
+    return executeServiceChain(operation, blob_descs, processed_blob_descs, is_inplace);
 }

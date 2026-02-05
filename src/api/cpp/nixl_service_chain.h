@@ -104,6 +104,23 @@ private:
     nixlServiceChainStatus validateRemoval(std::vector<nixlServiceH*>::const_iterator it) const;
     
     /**
+     * @brief Helper function to execute the service chain on blob descriptors
+     *
+     * Executes all services in the chain sequentially on the provided blob descriptors.
+     * Handles both in-place and out-of-place processing based on the is_inplace flag.
+     *
+     * @param operation The operation type (READ/WRITE)
+     * @param input_blob_descs Input blob descriptors
+     * @param output_blob_descs Output blob descriptors (may point to same as input for in-place)
+     * @param is_inplace Whether to process in-place (input and output are the same)
+     * @return nixlServiceChainStatus Status of the operation
+     */
+    nixlServiceChainStatus executeServiceChain(const nixl_xfer_op_t operation,
+                                               std::vector<nixlBlobDesc>& input_blob_descs,
+                                               std::vector<nixlBlobDesc>& output_blob_descs,
+                                               bool is_inplace);
+    
+    /**
      * @brief Check if the service chain is valid
      *
      * Returns the cached validation state of the chain. The state is updated
@@ -155,13 +172,17 @@ public:
      * the chain validates that the service can be legally placed at this position
      * based on memory type compatibility and service conditions.
      *
-     * @param service Pointer to the service engine to add
+     * @param service Service name to add
+     * @param flags Service operation flags (default: 0 = no in-place)
+     * @param customParams Optional custom parameters for service initialization
      * @return nixlServiceChainStatus Status code
      *         - SUCCESS: Service added successfully
      *         - INVALID_PARAM: Service is nullptr
      *         - NOT_ALLOWED: Service violates chain constraints
      */
-    nixlServiceChainStatus addService(nixl_service_t service);
+    nixlServiceChainStatus addService(nixl_service_t service,
+                                      uint32_t flags = 0,
+                                      const nixl_s_params_t* customParams = nullptr);
 
     /**
      * @brief Remove a service from the chain

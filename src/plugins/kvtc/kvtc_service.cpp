@@ -28,14 +28,35 @@ nixl_mem_list_t nixlKvtcServiceEngine::getSupportedMems() const {
 }
 
 nixl_status_t nixlKvtcServiceEngine::processData(const nixl_xfer_op_t &operation,
-                                                  const std::vector<nixlBlobDesc> &data_descs) {
+                                                  const std::vector<nixlBlobDesc> &data_descs,
+                                                  const std::vector<nixlBlobDesc> &processed_data_descs) {
     // Dummy implementation - does nothing, operates in-place
     (void)operation;  // Suppress unused warning
     (void)data_descs; // Suppress unused warning
-        
+    (void)processed_data_descs; // Suppress unused warning
+
     NIXL_DEBUG << "KVTC service processData called (no-op) for " 
                << data_descs.size() << " descriptor(s)";
     
-    // Since this is an in-place service, we don't modify anything
+    if (operation == NIXL_WRITE && processed_data_descs.size() > 0) {
+        // Copy each data descriptor to processed_data_descs, entry by entry
+        for (size_t i = 0; i < data_descs.size() && i < processed_data_descs.size(); ++i) {
+            nixlBlobDesc& out = const_cast<nixlBlobDesc&>(processed_data_descs[i]);
+            const nixlBlobDesc& in = data_descs[i];
+            std::memcpy(reinterpret_cast<void*>(out.addr),
+                        reinterpret_cast<const void*>(in.addr),
+                        in.len);
+        }
+    } else if (operation == NIXL_READ && processed_data_descs.size() > 0) {
+        // Copy each processed data descriptor to data_descs, entry by entry
+        for (size_t i = 0; i < processed_data_descs.size() && i < data_descs.size(); ++i) {
+            nixlBlobDesc& out = const_cast<nixlBlobDesc&>(data_descs[i]);
+            const nixlBlobDesc& in = processed_data_descs[i];
+            std::memcpy(reinterpret_cast<void*>(out.addr),
+                        reinterpret_cast<const void*>(in.addr),
+                        in.len);
+        }
+    }
+               
     return NIXL_SUCCESS;
 }

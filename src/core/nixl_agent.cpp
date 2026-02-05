@@ -852,7 +852,8 @@ nixlAgent::createXferReq(const nixl_xfer_op_t &operation,
                          const nixl_xfer_dlist_t &local_descs,
                          const nixl_xfer_dlist_t &remote_descs,
                          const std::string &remote_agent,
-                         nixlServiceChain* serviceChain,
+                         nixlServiceChain* service_chain,
+                         const nixl_xfer_dlist_t* processed_local_descs,
                          nixlXferReqH* &req_hndl,
                          const nixl_opt_args_t* extra_params) const {
     nixl_status_t     ret1, ret2;
@@ -920,13 +921,27 @@ nixlAgent::createXferReq(const nixl_xfer_op_t &operation,
     handle->initiatorDescs = new nixl_meta_dlist_t(local_descs.getType());
 
     handle->targetDescs = new nixl_meta_dlist_t(remote_descs.getType());
+    
+    // Allocate processedInitiatorDescs BEFORE using it (out-of-place mode)
+    if (processed_local_descs && processed_local_descs->descCount() > 0) {
+        handle->processedInitiatorDescs = new nixl_meta_dlist_t(processed_local_descs->getType());
+    }
 
     // Currently we loop through and find first local match. Can use a
     // preference list or more exhaustive search.
     for (auto & backend : *backend_set) {
         // If populate fails, it clears the resp before return
-        ret1 = data->memorySection->populate(
-                     local_descs, backend, *handle->initiatorDescs);
+        if (processed_local_descs && processed_local_descs->descCount() > 0) {
+            for (int i = 0; i < local_descs.descCount(); i++) {
+                const auto& desc = local_descs[i];
+                handle->initiatorDescs->addDesc(nixlMetaDesc(desc.addr, desc.len, desc.devId, nullptr));
+            }
+            ret1 = data->memorySection->populate(
+                         *processed_local_descs, backend, *handle->processedInitiatorDescs);
+        } else {
+            ret1 = data->memorySection->populate(
+                         local_descs, backend, *handle->initiatorDescs);
+        }
         ret2 = data->remoteSections[remote_agent]->populate(
                      remote_descs, backend, *handle->targetDescs);
 
@@ -942,6 +957,19 @@ nixlAgent::createXferReq(const nixl_xfer_op_t &operation,
                            "registrations to be able to do the transfer";
         data->addErrorTelemetry(NIXL_ERR_NOT_FOUND);
         return NIXL_ERR_NOT_FOUND;
+    }
+
+    // Only apply service chain to storage backends (local-only)
+    if (service_chain && service_chain->size() > 0) {
+        if (handle->engine->supportsLocal() && !handle->engine->supportsRemote()) {
+            handle->service_chain = service_chain;
+            NIXL_DEBUG << "Service chain assigned for storage backend with " 
+                    << service_chain->size() << " service(s)";
+        } else {
+            NIXL_ERROR_FUNC << "service chain is not supported for remote backends";
+            data->addErrorTelemetry(NIXL_ERR_NOT_ALLOWED);
+            return NIXL_ERR_NOT_ALLOWED;
+        }
     }
 
     if (extra_params) {
@@ -966,31 +994,27 @@ nixlAgent::createXferReq(const nixl_xfer_op_t &operation,
     handle->status = NIXL_ERR_NOT_POSTED;
     handle->notifMsg = opt_args.notifMsg;
     handle->hasNotif = opt_args.hasNotif;
-    
-    // Only apply service chain to storage backends (local-only)
-    if (serviceChain && serviceChain->size() > 0) {
-        if (handle->engine->supportsLocal() && !handle->engine->supportsRemote()) {
-            handle->service_chain = serviceChain;
-            NIXL_DEBUG << "Service chain assigned to storage backend '" << handle->engine->getType() 
-                       << "' with " << serviceChain->size() << " service(s)";
-        } else {
-            NIXL_ERROR_FUNC << "service chain is not supported for remote backends";
-            data->addErrorTelemetry(NIXL_ERR_NOT_ALLOWED);
-            return NIXL_ERR_NOT_ALLOWED;
-        }
-    }
-
+  
     if (data->telemetryEnabled) {
         handle->telemetry.totalBytes = total_bytes;
         handle->telemetry.descCount = handle->initiatorDescs->descCount();
     }
 
-    ret1 = handle->engine->prepXfer (handle->backendOp,
-                                     *handle->initiatorDescs,
+    if (processed_local_descs && processed_local_descs->descCount() > 0) {
+        ret1 = handle->engine->prepXfer (handle->backendOp,
+                                     *handle->processedInitiatorDescs,
                                      *handle->targetDescs,
                                      handle->remoteAgent,
                                      handle->backendHandle,
                                      &opt_args);
+    } else {
+        ret1 = handle->engine->prepXfer (handle->backendOp,
+                                        *handle->initiatorDescs,
+                                        *handle->targetDescs,
+                                        handle->remoteAgent,
+                                        handle->backendHandle,
+                                        &opt_args);
+    }
     if (ret1 != NIXL_SUCCESS) {
         NIXL_ERROR_FUNC << "backend '" << handle->engine->getType()
                         << "' failed to prepare the transfer request with status " << ret1;
@@ -1117,7 +1141,8 @@ nixlAgent::postXferReq(nixlXferReqH *req_hndl,
     if (req_hndl->service_chain != nullptr && req_hndl->service_chain->size() > 0) {
         NIXL_INFO << "Applying service chain with " << req_hndl->service_chain->size() << " service(s)";
         
-        nixlServiceChainStatus chain_status = req_hndl->service_chain->operateServices(req_hndl->backendOp, *req_hndl->initiatorDescs, nullptr);
+        nixlServiceChainStatus chain_status = req_hndl->service_chain->operateServices(req_hndl->backendOp, *req_hndl->initiatorDescs, 
+                                                                                       req_hndl->processedInitiatorDescs);
         if (chain_status != nixlServiceChainStatus::SUCCESS) {
             NIXL_ERROR << "Service chain processing failed with status " << static_cast<int>(chain_status);
             data->addErrorTelemetry(NIXL_ERR_BACKEND);

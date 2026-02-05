@@ -42,6 +42,7 @@ class nixlXferReqH {
         nixl_meta_dlist_t* targetDescs    = nullptr;
         
         nixlServiceChain*  service_chain  = nullptr;
+        nixl_meta_dlist_t* processedInitiatorDescs = nullptr;
 
         std::string        remoteAgent;
         nixl_blob_t        notifMsg;

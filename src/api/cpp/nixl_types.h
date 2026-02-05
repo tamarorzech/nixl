@@ -47,6 +47,14 @@ enum nixl_mem_t {DRAM_SEG, VRAM_SEG, BLK_SEG, OBJ_SEG, FILE_SEG};
 enum nixl_xfer_op_t {NIXL_READ, NIXL_WRITE};
 
 /**
+ * @enum   nixl_s_flags_t
+ * @brief  Flags for service operations
+ */
+enum nixl_s_flags_t {
+    NIXL_SERVICE_INPLACE = 1 << 0,  // Operate in-place
+};
+
+/**
  * @enum   nixl_status_t
  * @brief  An enumeration of status values and error codes for NIXL
  */
