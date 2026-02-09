@@ -242,10 +242,10 @@ class nixlAgent {
                        const nixl_xfer_dlist_t &local_descs,
                        const nixl_xfer_dlist_t &remote_descs,
                        const std::string &remote_agent,
-                       nixlServiceChain* service_chain,
-                       const nixl_xfer_dlist_t *processed_local_descs,
                        nixlXferReqH* &req_hndl,
-                       const nixl_opt_args_t* extra_params = nullptr) const;
+                       const nixl_opt_args_t* extra_params = nullptr,
+                       nixlServiceChain* service_chain = nullptr,
+                       const nixl_xfer_dlist_t* processed_local_descs = nullptr) const;
 
         /*** Operations on prepared Transfer Request ***/
 

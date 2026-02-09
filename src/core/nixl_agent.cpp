@@ -852,10 +852,10 @@ nixlAgent::createXferReq(const nixl_xfer_op_t &operation,
                          const nixl_xfer_dlist_t &local_descs,
                          const nixl_xfer_dlist_t &remote_descs,
                          const std::string &remote_agent,
-                         nixlServiceChain* service_chain,
-                         const nixl_xfer_dlist_t* processed_local_descs,
                          nixlXferReqH* &req_hndl,
-                         const nixl_opt_args_t* extra_params) const {
+                         const nixl_opt_args_t* extra_params,
+                         nixlServiceChain* service_chain,
+                         const nixl_xfer_dlist_t* processed_local_descs) const {
     nixl_status_t     ret1, ret2;
     nixl_opt_b_args_t opt_args;
 

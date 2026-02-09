@@ -339,10 +339,10 @@ int main(int argc, char **argv) {
     // For local backends, remote_agent should be the same agent
     ret = agent.createXferReq(NIXL_WRITE, src_xfer_descs, dst_xfer_descs, 
                               agent_name,  // Same agent for local operations
-                              &service_chain,
-                              processed_descs_ptr,
                               req_handle, 
-                              &extra_params);
+                              &extra_params,
+                              &service_chain,
+                              processed_descs_ptr);
     nixl_exit_on_failure(ret, "Failed to create transfer request", agent_name);
 
     // Post transfer request
@@ -440,10 +440,10 @@ int main(int argc, char **argv) {
     
     ret = agent.createXferReq(NIXL_READ, read_local_descs, read_remote_descs,
                               agent_name,  // Same agent for local operations
-                              &service_chain,
-                              read_processed_descs_ptr,  // Pass processed buffer for out-of-place
                               read_req_handle,
-                              &extra_params);
+                              &extra_params,
+                              &service_chain,
+                              read_processed_descs_ptr);
     nixl_exit_on_failure(ret, "Failed to create READ transfer request", agent_name);
     
     // Post READ transfer request

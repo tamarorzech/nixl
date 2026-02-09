@@ -641,7 +641,7 @@ PYBIND11_MODULE(_bindings, m) {
                     extra_params.hasNotif = true;
                 }
                 nixl_status_t ret = agent.createXferReq(
-                    operation, local_descs, remote_descs, remote_agent, nullptr, nullptr, handle, &extra_params);
+                    operation, local_descs, remote_descs, remote_agent, handle, &extra_params);
 
                 throw_nixl_exception(ret);
                 return (uintptr_t)handle;
