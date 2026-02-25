@@ -89,46 +89,102 @@ void printParams(const nixl_b_params_t& params, const nixl_mem_list_t& mems) {
     }
 }
 
-int main(int argc, char **argv) {
-    nixl_status_t ret;
+// Structure to hold parsed command-line arguments
+struct ProgramArgs {
+    std::string backend;
+    bool use_out_of_place;
+};
+
+// Parse command-line arguments
+ProgramArgs parseArguments(int argc, char **argv) {
+    ProgramArgs args;
+    args.backend = "POSIX";
+    args.use_out_of_place = false;
     
-    // Parse command-line arguments
-    // Usage: nixl_service_example [BACKEND] [oop]
     if (argc > 1) {
         std::string arg1 = argv[1];
         if (arg1 == "-h" || arg1 == "--help") {
             std::cout << "Usage: " << argv[0] << " [BACKEND] [oop]\n";
             std::cout << "  BACKEND: Backend name (default: POSIX)\n";
             std::cout << "  oop:     Enable out-of-place mode (default: in-place)\n";
-            return 0;
+            exit(0);
         }
-    }
-    
-    std::string backend = "POSIX";
-    bool use_out_of_place = false;  // Default: in-place mode
-    
-    if (argc > 1) {
-        backend = argv[1];
+        args.backend = arg1;
     }
     
     if (argc > 2) {
         std::string mode_arg = argv[2];
         if (mode_arg == "oop" || mode_arg == "--oop" || mode_arg == "out-of-place") {
-            use_out_of_place = true;
+            args.use_out_of_place = true;
         }
     }
+    
+    return args;
+}
 
-    std::cout << "========================================\n";
-    std::cout << "NIXL Local Service Chain Example\n";
-    std::cout << "Backend: " << backend << "\n";
-    std::cout << "Mode: " << (use_out_of_place ? "Out-of-Place" : "In-Place (default)") << "\n";
-    std::cout << "Tests: WRITE (DRAM->FILE) + READ (FILE->DRAM)\n";
-    std::cout << "========================================\n\n";
+// Structure to hold buffer resources
+struct BufferResources {
+    void* src_buffer;
+    void* processed_buffer;
+    size_t buffer_size;
+    int dst_fd;
+    std::string dst_file_path;
+};
 
-    // Create agent with listener disabled (no remote operations needed)
-    nixlAgentConfig cfg(false);  // false = no listener thread
-    nixlAgent agent(agent_name, cfg);
+// Allocate source and processed buffers
+BufferResources allocateBuffers(bool use_out_of_place) {
+    BufferResources resources;
+    resources.processed_buffer = nullptr;
+    
+    constexpr size_t float_size = sizeof(float);
+    resources.buffer_size = 40960 * float_size;
+    
+    resources.src_buffer = calloc(1, resources.buffer_size);
+    if (!resources.src_buffer) {
+        std::cerr << "Failed to allocate source buffer\n";
+        exit(1);
+    }
+    memset(resources.src_buffer, 0xAA, resources.buffer_size);
+    
+    if (use_out_of_place) {
+        resources.processed_buffer = aligned_alloc(4096, resources.buffer_size);
+        if (!resources.processed_buffer) {
+            std::cerr << "Failed to allocate processed buffer\n";
+            free(resources.src_buffer);
+            exit(1);
+        }
+        memset(resources.processed_buffer, 0xBB, resources.buffer_size);
+    }
+    
+    return resources;
+}
 
+// Setup destination file
+int setupFile(const std::string& file_path, size_t buffer_size) {
+    int fd = open(file_path.c_str(), O_CREAT | O_RDWR | O_TRUNC, 0644);
+    if (fd < 0) {
+        std::cerr << "Failed to open destination file: " << file_path << "\n";
+        return -1;
+    }
+    
+    // Pre-allocate file with zeros
+    std::vector<uint8_t> zeros(buffer_size, 0x00);
+    ssize_t written = write(fd, zeros.data(), buffer_size);
+    if (written != (ssize_t)buffer_size) {
+        std::cerr << "Failed to write initial data to file\n";
+        close(fd);
+        return -1;
+    }
+    
+    return fd;
+}
+
+// Initialize agent and create backend
+nixlBackendH* initializeAgentAndBackend(const std::string& backend, 
+                                        nixlAgent& agent,
+                                        nixl_opt_args_t& extra_params) {
+    nixl_status_t ret;
+    
     // Get available plugins
     std::vector<nixl_backend_t> plugins;
     ret = agent.getAvailPlugins(plugins);
@@ -143,7 +199,7 @@ int main(int argc, char **argv) {
     if (std::find(plugins.begin(), plugins.end(), backend) == plugins.end()) {
         std::cerr << "ERROR: Backend '" << backend << "' not found!\n";
         std::cerr << "Available backends listed above.\n";
-        return 1;
+        exit(1);
     }
 
     // Get plugin parameters
@@ -161,74 +217,24 @@ int main(int argc, char **argv) {
     ret = agent.createBackend(backend, init_params, backend_handle);
     nixl_exit_on_failure(ret, "Failed to create " + backend + " backend", agent_name);
 
-    nixl_opt_args_t extra_params;
     extra_params.backends.push_back(backend_handle);
+    
+    return backend_handle;
+}
 
-    std::cout << "Backend created successfully\n\n";
-
-    // POSIX backend: Local=DRAM, Remote=FILE
-    // Allocate DRAM buffer (source)
-    size_t buffer_size = 1024;
-    void* src_buffer = calloc(1, buffer_size);
-    if (!src_buffer) {
-        std::cerr << "Failed to allocate source buffer\n";
-        return 1;
-    }
-    memset(src_buffer, 0xAA, buffer_size);
+// Register memory with backend
+void registerMemory(nixlAgent& agent, 
+                    const BufferResources& resources,
+                    bool use_out_of_place,
+                    nixl_opt_args_t& extra_params) {
+    nixl_status_t ret;
     
-    // Create and open destination file
-    std::string dst_file_path = "/tmp/nixl_dst_test_file.bin";
-    
-    // Allocate processed buffer for out-of-place mode (before opening file)
-    void* processed_buffer = nullptr;
-    if (use_out_of_place) {
-        processed_buffer = aligned_alloc(4096, buffer_size);
-        if (!processed_buffer) {
-            std::cerr << "Failed to allocate processed buffer\n";
-            free(src_buffer);
-            return 1;
-        }
-        memset(processed_buffer, 0xBB, buffer_size);  // Initialize with different pattern
-    }
-    
-    // Open file with O_CREAT to create if doesn't exist, O_RDWR for read/write
-    int dst_fd = open(dst_file_path.c_str(), O_CREAT | O_RDWR | O_TRUNC, 0644);
-    if (dst_fd < 0) {
-        std::cerr << "Failed to open destination file: " << dst_file_path << "\n";
-        free(src_buffer);
-        if (processed_buffer) free(processed_buffer);
-        return 1;
-    }
-    
-    // Pre-allocate file with zeros using write
-    std::vector<uint8_t> zeros(buffer_size, 0x00);
-    ssize_t written = write(dst_fd, zeros.data(), buffer_size);
-    if (written != (ssize_t)buffer_size) {
-        std::cerr << "Failed to write initial data to file\n";
-        close(dst_fd);
-        free(src_buffer);
-        if (processed_buffer) free(processed_buffer);
-        return 1;
-    }
-    
-    if (use_out_of_place) {
-        std::cout << "Allocated resources:\n";
-        std::cout << "  Source (DRAM):      " << src_buffer << " (size: " << buffer_size << " bytes, pattern: 0xAA)\n";
-        std::cout << "  Processed (DRAM):   " << processed_buffer << " (size: " << buffer_size << " bytes, pattern: 0xBB)\n";
-        std::cout << "  Destination (FILE): " << dst_file_path << " (fd: " << dst_fd << ", size: " << buffer_size << " bytes, pattern: 0x00)\n\n";
-    } else {
-        std::cout << "Allocated resources:\n";
-        std::cout << "  Source (DRAM):      " << src_buffer << " (size: " << buffer_size << " bytes, pattern: 0xAA)\n";
-        std::cout << "  Destination (FILE): " << dst_file_path << " (fd: " << dst_fd << ", size: " << buffer_size << " bytes, pattern: 0x00)\n\n";
-    }
-
-    // Register memory based on mode
     if (use_out_of_place) {
         // Out-of-place: Only register processed buffer (output)
         nixl_reg_dlist_t reg_list_processed(DRAM_SEG);
         nixlBlobDesc processed_desc;
-        processed_desc.addr = (uintptr_t)processed_buffer;
-        processed_desc.len = buffer_size;
+        processed_desc.addr = (uintptr_t)resources.processed_buffer;
+        processed_desc.len = resources.buffer_size;
         processed_desc.devId = 0;
         reg_list_processed.addDesc(processed_desc);
         
@@ -241,8 +247,8 @@ int main(int argc, char **argv) {
         // In-place: Register source buffer
         nixl_reg_dlist_t reg_list_src(DRAM_SEG);
         nixlBlobDesc src_desc;
-        src_desc.addr = (uintptr_t)src_buffer;
-        src_desc.len = buffer_size;
+        src_desc.addr = (uintptr_t)resources.src_buffer;
+        src_desc.len = resources.buffer_size;
         src_desc.devId = 0;
         reg_list_src.addDesc(src_desc);
         
@@ -256,23 +262,27 @@ int main(int argc, char **argv) {
     // Always register destination file (FILE)
     nixl_reg_dlist_t reg_list_dst(FILE_SEG);
     nixlBlobDesc dst_desc;
-    dst_desc.addr = 0;  // Not used for registration
-    dst_desc.len = buffer_size;
-    dst_desc.devId = dst_fd;  // File descriptor!
-    dst_desc.metaInfo = dst_file_path;  // File path for query operations
+    dst_desc.addr = 0;
+    dst_desc.len = resources.buffer_size;
+    dst_desc.devId = resources.dst_fd;
+    dst_desc.metaInfo = resources.dst_file_path;
     reg_list_dst.addDesc(dst_desc);
     
     ret = agent.registerMem(reg_list_dst, &extra_params);
     nixl_exit_on_failure(ret, "Failed to register destination file", agent_name);
+}
 
-    // Create service chain (will be applied for storage backends only)
+// Create and configure service chain
+nixlServiceChain createServiceChain(bool use_out_of_place) {
     nixlServiceChain service_chain;
-    nixl_service_t service_type = "kvtc";  // KVTC is a no-op service for testing
+    nixl_service_t service_type = "kvtc";
     
     std::cout << "Creating service chain...\n";
-    // Set flags based on command-line argument (default: in-place)
     uint32_t service_flags = use_out_of_place ? 0 : NIXL_SERVICE_INPLACE;
-    auto chain_status = service_chain.addService(service_type, service_flags);
+    nixl_s_params_t service_params;
+    service_params["dev_bdf"] = "0000:81:00.0";
+    service_params["server_name"] = "kvtc_demo";
+    auto chain_status = service_chain.addService(service_type, service_flags, &service_params);
     if (chain_status == nixlServiceChainStatus::SUCCESS) {
         std::cout << "  Added service: " << service_type 
                   << " (" << (use_out_of_place ? "out-of-place" : "in-place") << " mode)\n";
@@ -282,108 +292,116 @@ int main(int argc, char **argv) {
                   << static_cast<int>(chain_status) << ")\n";
         std::cout << "  Continuing without service chain...\n\n";
     }
+    
+    return service_chain;
+}
 
-    // ========================================
-    // TEST WRITE OPERATION (DRAM -> FILE)
-    // ========================================
+// Perform WRITE operation (DRAM -> FILE)
+void performWriteOperation(nixlAgent& agent,
+                          const BufferResources& resources,
+                          bool use_out_of_place,
+                          nixl_opt_args_t& extra_params,
+                          nixlServiceChain& service_chain) {
+    nixl_status_t ret;
     
     std::cout << "========================================\n";
     std::cout << "Testing WRITE operation (DRAM -> FILE)\n";
     std::cout << "========================================\n\n";
     
-    // Create transfer descriptors
-    size_t xfer_size = 256;  // Transfer 256 bytes
+    size_t xfer_size = resources.buffer_size;
     
     // Source: DRAM buffer
     nixl_xfer_dlist_t src_xfer_descs(DRAM_SEG);
     nixlBasicDesc src_xfer;
-    src_xfer.addr = (uintptr_t)src_buffer;
+    src_xfer.addr = (uintptr_t)resources.src_buffer;
     src_xfer.len = xfer_size;
     src_xfer.devId = 0;
     src_xfer_descs.addDesc(src_xfer);
     
-    // Destination: FILE (offset in file)
+    // Destination: FILE
     nixl_xfer_dlist_t dst_xfer_descs(FILE_SEG);
     nixlBasicDesc dst_xfer;
-    dst_xfer.addr = 0;  // Offset in file (start of file)
+    dst_xfer.addr = 0;
     dst_xfer.len = xfer_size;
-    dst_xfer.devId = dst_fd;  // File descriptor
+    dst_xfer.devId = resources.dst_fd;
     dst_xfer_descs.addDesc(dst_xfer);
 
-    // Create processed buffer descriptors for out-of-place mode
+    // Processed buffer descriptors for out-of-place mode
     nixl_xfer_dlist_t* processed_descs_ptr = nullptr;
     nixl_xfer_dlist_t processed_descs(DRAM_SEG);
     
     if (use_out_of_place) {
         nixlBasicDesc processed_xfer;
-        processed_xfer.addr = (uintptr_t)processed_buffer;
+        processed_xfer.addr = (uintptr_t)resources.processed_buffer;
         processed_xfer.len = xfer_size;
         processed_xfer.devId = 0;
         processed_descs.addDesc(processed_xfer);
         processed_descs_ptr = &processed_descs;
     }
     
-    // Create transfer request (local operation)
     nixlXferReqH *req_handle;
     
     std::cout << "Creating transfer request...\n";
     std::cout << "  Operation: NIXL_WRITE (local copy)\n";
-    std::cout << "  Source: " << (void*)src_xfer.addr << "\n";
+    std::cout << "  Source: " << resources.src_buffer << "\n";
     if (use_out_of_place) {
-        std::cout << "  Processed: " << processed_buffer << " (out-of-place)\n";
+        std::cout << "  Processed: " << resources.processed_buffer << " (out-of-place)\n";
     }
     std::cout << "  Destination: " << (void*)dst_xfer.addr << "\n";
     std::cout << "  Size: " << xfer_size << " bytes\n";
     std::cout << "  Remote agent: " << agent_name << " (same agent for local ops)\n\n";
     
-    // For local backends, remote_agent should be the same agent
     ret = agent.createXferReq(NIXL_WRITE, src_xfer_descs, dst_xfer_descs, 
-                              agent_name,  // Same agent for local operations
-                              req_handle, 
-                              &extra_params,
-                              &service_chain,
-                              processed_descs_ptr);
+                              agent_name, req_handle, &extra_params,
+                              &service_chain, processed_descs_ptr);
     nixl_exit_on_failure(ret, "Failed to create transfer request", agent_name);
 
-    // Post transfer request
     std::cout << "Posting transfer request...\n";
     nixl_status_t status = agent.postXferReq(req_handle);
     nixl_exit_on_failure((status >= NIXL_SUCCESS), "Failed to post transfer request", agent_name);
 
     std::cout << "Transfer posted, waiting for completion...\n";
 
-    // Wait for transfer completion
     while (status != NIXL_SUCCESS) {
         status = agent.getXferStatus(req_handle);
         nixl_exit_on_failure((status >= NIXL_SUCCESS), "Transfer failed", agent_name);
     }
 
     std::cout << "Transfer completed successfully!\n\n";
+    
+    ret = agent.releaseXferReq(req_handle);
+    nixl_exit_on_failure(ret, "Failed to release transfer request", agent_name);
+}
 
-    // ========================================
-    // TEST READ OPERATION (FILE -> DRAM)
-    // ========================================
+// Perform READ operation (FILE -> DRAM)
+void performReadOperation(nixlAgent& agent,
+                         const BufferResources& resources,
+                         bool use_out_of_place,
+                         nixl_opt_args_t& extra_params,
+                         nixlServiceChain& service_chain) {
+    nixl_status_t ret;
     
     std::cout << "========================================\n";
     std::cout << "Testing READ operation (FILE -> DRAM)\n";
     std::cout << "========================================\n\n";
     
-    // Allocate a new destination buffer for read operation
-    void* read_dst_buffer = calloc(1, buffer_size);
+    // Allocate read destination buffer
+    void* read_dst_buffer = calloc(1, resources.buffer_size);
     if (!read_dst_buffer) {
         std::cerr << "Failed to allocate read destination buffer\n";
-        return 1;
+        exit(1);
     }
-    memset(read_dst_buffer, 0x00, buffer_size);  // Initialize with zeros
+    memset(read_dst_buffer, 0x00, resources.buffer_size);
     
     std::cout << "Allocated read destination buffer:\n";
-    std::cout << "  Address: " << read_dst_buffer << " (size: " << buffer_size << " bytes, pattern: 0x00)\n\n";
+    std::cout << "  Address: " << read_dst_buffer << " (size: " << resources.buffer_size 
+              << " bytes, pattern: 0x00)\n\n";
     
-    // Register the new destination buffer
+    // Register read destination buffer
     nixl_reg_dlist_t reg_list_read_dst(DRAM_SEG);
     nixlBlobDesc read_dst_desc;
     read_dst_desc.addr = (uintptr_t)read_dst_buffer;
-    read_dst_desc.len = buffer_size;
+    read_dst_desc.len = resources.buffer_size;
     read_dst_desc.devId = 0;
     reg_list_read_dst.addDesc(read_dst_desc);
     
@@ -392,10 +410,7 @@ int main(int argc, char **argv) {
     
     std::cout << "Memory registered with backend\n\n";
     
-    // Create READ transfer descriptors
-    // For NIXL_READ with POSIX:
-    //   - local (first param) = DRAM buffer (where we read INTO)
-    //   - remote (second param) = FILE (where we read FROM)
+    size_t xfer_size = resources.buffer_size;
     
     // Local: DRAM buffer (destination)
     nixl_xfer_dlist_t read_local_descs(DRAM_SEG);
@@ -408,52 +423,46 @@ int main(int argc, char **argv) {
     // Remote: FILE (source)
     nixl_xfer_dlist_t read_remote_descs(FILE_SEG);
     nixlBasicDesc read_remote;
-    read_remote.addr = 0;  // Offset in file (start)
+    read_remote.addr = 0;
     read_remote.len = xfer_size;
-    read_remote.devId = dst_fd;  // Same file descriptor
+    read_remote.devId = resources.dst_fd;
     read_remote_descs.addDesc(read_remote);
     
-    // Create processed buffer descriptors for out-of-place READ
+    // Processed buffer descriptors for out-of-place READ
     nixl_xfer_dlist_t* read_processed_descs_ptr = nullptr;
     nixl_xfer_dlist_t read_processed_descs(DRAM_SEG);
     
     if (use_out_of_place) {
         nixlBasicDesc read_processed;
-        read_processed.addr = (uintptr_t)processed_buffer;
+        read_processed.addr = (uintptr_t)resources.processed_buffer;
         read_processed.len = xfer_size;
         read_processed.devId = 0;
         read_processed_descs.addDesc(read_processed);
         read_processed_descs_ptr = &read_processed_descs;
     }
     
-    // Create READ transfer request
     nixlXferReqH *read_req_handle;
     
     std::cout << "Creating READ transfer request...\n";
     std::cout << "  Operation: NIXL_READ (FILE -> DRAM)\n";
     std::cout << "  Local (DRAM): " << read_dst_buffer << "\n";
     if (use_out_of_place) {
-        std::cout << "  Processed: " << processed_buffer << " (out-of-place)\n";
+        std::cout << "  Processed: " << resources.processed_buffer << " (out-of-place)\n";
     }
-    std::cout << "  Remote (FILE): offset 0, fd " << dst_fd << "\n";
+    std::cout << "  Remote (FILE): offset 0, fd " << resources.dst_fd << "\n";
     std::cout << "  Size: " << xfer_size << " bytes\n\n";
     
     ret = agent.createXferReq(NIXL_READ, read_local_descs, read_remote_descs,
-                              agent_name,  // Same agent for local operations
-                              read_req_handle,
-                              &extra_params,
-                              &service_chain,
-                              read_processed_descs_ptr);
+                              agent_name, read_req_handle, &extra_params,
+                              &service_chain, read_processed_descs_ptr);
     nixl_exit_on_failure(ret, "Failed to create READ transfer request", agent_name);
     
-    // Post READ transfer request
     std::cout << "Posting READ transfer request...\n";
-    status = agent.postXferReq(read_req_handle);
+    nixl_status_t status = agent.postXferReq(read_req_handle);
     nixl_exit_on_failure((status >= NIXL_SUCCESS), "Failed to post READ transfer request", agent_name);
     
     std::cout << "READ transfer posted, waiting for completion...\n";
     
-    // Wait for READ transfer completion
     while (status != NIXL_SUCCESS) {
         status = agent.getXferStatus(read_req_handle);
         nixl_exit_on_failure((status >= NIXL_SUCCESS), "READ transfer failed", agent_name);
@@ -465,13 +474,13 @@ int main(int argc, char **argv) {
     std::cout << "Verifying READ transfer (FILE -> DRAM)...\n";
     std::cout << "  Checking first " << xfer_size << " bytes...\n";
     
-    bool read_correct = (memcmp(src_buffer, read_dst_buffer, xfer_size) == 0);
+    bool read_correct = (memcmp(resources.src_buffer, read_dst_buffer, xfer_size) == 0);
     
     if (read_correct) {
         std::cout << "  ✓ READ verification PASSED\n";
         std::cout << "  First 16 bytes of original source:  ";
         for (size_t i = 0; i < 16; i++)
-            printf("%02X ", ((uint8_t*)src_buffer)[i]);
+            printf("%02X ", ((uint8_t*)resources.src_buffer)[i]);
         std::cout << "\n  First 16 bytes after READ from file: ";
         for (size_t i = 0; i < 16; i++)
             printf("%02X ", ((uint8_t*)read_dst_buffer)[i]);
@@ -482,70 +491,123 @@ int main(int argc, char **argv) {
     
     nixl_exit_on_failure(read_correct, "Data mismatch after READ transfer", agent_name);
     
-    // Release READ transfer request
     ret = agent.releaseXferReq(read_req_handle);
     nixl_exit_on_failure(ret, "Failed to release READ transfer request", agent_name);
     
-    // Deregister read buffer memory
     ret = agent.deregisterMem(reg_list_read_dst, &extra_params);
     nixl_exit_on_failure(ret, "Failed to deregister read buffer memory", agent_name);
     
-    // Free read buffer
     free(read_dst_buffer);
+}
+
+// Cleanup resources
+void cleanupResources(const BufferResources& resources, bool use_out_of_place) {
+    close(resources.dst_fd);
+    free(resources.src_buffer);
+    if (use_out_of_place && resources.processed_buffer) {
+        free(resources.processed_buffer);
+    }
+    std::remove(resources.dst_file_path.c_str());
+    std::cout << "Cleaned up resources (closed file, freed buffers, removed file)\n";
+}
+
+int main(int argc, char **argv) {
+    // Parse command-line arguments
+    ProgramArgs args = parseArguments(argc, argv);
+    
+    std::cout << "========================================\n";
+    std::cout << "NIXL Local Service Chain Example\n";
+    std::cout << "Backend: " << args.backend << "\n";
+    std::cout << "Mode: " << (args.use_out_of_place ? "Out-of-Place" : "In-Place (default)") << "\n";
+    std::cout << "Tests: WRITE (DRAM->FILE) + READ (FILE->DRAM)\n";
+    std::cout << "========================================\n\n";
+
+    // Create agent with listener disabled (no remote operations needed)
+    nixlAgentConfig cfg(false);  // false = no listener thread
+    nixlAgent agent(agent_name, cfg);
+    nixl_opt_args_t extra_params;
+
+    // Initialize agent and backend
+    initializeAgentAndBackend(args.backend, agent, extra_params);
+    std::cout << "Backend created successfully\n\n";
+
+    // Allocate buffers and setup file
+    BufferResources resources = allocateBuffers(args.use_out_of_place);
+    resources.dst_file_path = "/tmp/nixl_dst_test_file.bin";
+    resources.dst_fd = setupFile(resources.dst_file_path, resources.buffer_size);
+    if (resources.dst_fd < 0) {
+        free(resources.src_buffer);
+        if (resources.processed_buffer) free(resources.processed_buffer);
+        return 1;
+    }
+    
+    // Print allocated resources
+    if (args.use_out_of_place) {
+        std::cout << "Allocated resources:\n";
+        std::cout << "  Source (DRAM):      " << resources.src_buffer 
+                  << " (size: " << resources.buffer_size << " bytes, pattern: 0xAA)\n";
+        std::cout << "  Processed (DRAM):   " << resources.processed_buffer 
+                  << " (size: " << resources.buffer_size << " bytes, pattern: 0xBB)\n";
+        std::cout << "  Destination (FILE): " << resources.dst_file_path 
+                  << " (fd: " << resources.dst_fd << ", size: " << resources.buffer_size 
+                  << " bytes, pattern: 0x00)\n\n";
+    } else {
+        std::cout << "Allocated resources:\n";
+        std::cout << "  Source (DRAM):      " << resources.src_buffer 
+                  << " (size: " << resources.buffer_size << " bytes, pattern: 0xAA)\n";
+        std::cout << "  Destination (FILE): " << resources.dst_file_path 
+                  << " (fd: " << resources.dst_fd << ", size: " << resources.buffer_size 
+                  << " bytes, pattern: 0x00)\n\n";
+    }
+
+    // Register memory with backend
+    registerMemory(agent, resources, args.use_out_of_place, extra_params);
+
+    // Create service chain
+    nixlServiceChain service_chain = createServiceChain(args.use_out_of_place);
+
+    // Perform WRITE operation
+    performWriteOperation(agent, resources, args.use_out_of_place, extra_params, service_chain);
+
+    // Perform READ operation
+    // performReadOperation(agent, resources, args.use_out_of_place, extra_params, service_chain);
 
     // Cleanup
-    std::cout << "\n========================================\n";
     std::cout << "Cleanup\n";
-    std::cout << "========================================\n\n";
+    nixl_status_t ret;
     
-    ret = agent.releaseXferReq(req_handle);
-    nixl_exit_on_failure(ret, "Failed to release WRITE transfer request", agent_name);
-
-    // Deregister memory based on mode
-    if (use_out_of_place) {
-        // Out-of-place: Deregister processed buffer
+    // Deregister memory
+    if (args.use_out_of_place) {
         nixl_reg_dlist_t dereg_processed(DRAM_SEG);
-        nixlBlobDesc dereg_proc_desc;
-        dereg_proc_desc.addr = (uintptr_t)processed_buffer;
-        dereg_proc_desc.len = buffer_size;
-        dereg_proc_desc.devId = 0;
-        dereg_processed.addDesc(dereg_proc_desc);
-        
+        nixlBlobDesc processed_dereg;
+        processed_dereg.addr = (uintptr_t)resources.processed_buffer;
+        processed_dereg.len = resources.buffer_size;
+        processed_dereg.devId = 0;
+        dereg_processed.addDesc(processed_dereg);
         ret = agent.deregisterMem(dereg_processed, &extra_params);
         nixl_exit_on_failure(ret, "Failed to deregister processed buffer", agent_name);
     } else {
-        // In-place: Deregister source buffer
         nixl_reg_dlist_t dereg_src(DRAM_SEG);
-        nixlBlobDesc dereg_src_desc;
-        dereg_src_desc.addr = (uintptr_t)src_buffer;
-        dereg_src_desc.len = buffer_size;
-        dereg_src_desc.devId = 0;
-        dereg_src.addDesc(dereg_src_desc);
-        
+        nixlBlobDesc src_dereg;
+        src_dereg.addr = (uintptr_t)resources.src_buffer;
+        src_dereg.len = resources.buffer_size;
+        src_dereg.devId = 0;
+        dereg_src.addDesc(src_dereg);
         ret = agent.deregisterMem(dereg_src, &extra_params);
         nixl_exit_on_failure(ret, "Failed to deregister source memory", agent_name);
     }
     
-    // Deregister destination file (always registered)
     nixl_reg_dlist_t dereg_dst(FILE_SEG);
-    nixlBlobDesc dereg_dst_desc;
-    dereg_dst_desc.addr = 0;
-    dereg_dst_desc.len = buffer_size;
-    dereg_dst_desc.devId = dst_fd;
-    dereg_dst_desc.metaInfo = dst_file_path;
-    dereg_dst.addDesc(dereg_dst_desc);
-    
+    nixlBlobDesc dst_dereg;
+    dst_dereg.addr = 0;
+    dst_dereg.len = resources.buffer_size;
+    dst_dereg.devId = resources.dst_fd;
+    dst_dereg.metaInfo = resources.dst_file_path;
+    dereg_dst.addDesc(dst_dereg);
     ret = agent.deregisterMem(dereg_dst, &extra_params);
     nixl_exit_on_failure(ret, "Failed to deregister destination file", agent_name);
 
-    // Cleanup resources
-    close(dst_fd);  // Close file descriptor
-    free(src_buffer);
-    if (use_out_of_place && processed_buffer) {
-        free(processed_buffer);
-    }
-    std::remove(dst_file_path.c_str());
-    std::cout << "Cleaned up resources (closed file, freed buffers, removed file)\n";
+    cleanupResources(resources, args.use_out_of_place);
 
     std::cout << "\n========================================\n";
     std::cout << "All tests completed successfully!\n";

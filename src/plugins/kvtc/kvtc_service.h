@@ -20,6 +20,9 @@
 
 #include "service/service_engine.h"
 
+// Forward declaration
+class HostClient;
+
 /**
  * @class nixlKvtcServiceEngine
  * @brief KVTC service engine - a dummy in-place service that does nothing
@@ -38,7 +41,7 @@ public:
     /**
      * @brief Destructor
      */
-    ~nixlKvtcServiceEngine() override = default;
+    ~nixlKvtcServiceEngine() override;
 
     /**
      * @brief Get supported memory types for KVTC service
@@ -55,6 +58,9 @@ public:
     nixl_status_t processData(const nixl_xfer_op_t &operation,
                               const std::vector<nixlBlobDesc> &data_descs,
                               const std::vector<nixlBlobDesc> &processed_data_descs) override;
+
+private:
+    HostClient* client_;  // HostClient instance for DOCA communication
 };
 
 #endif // __KVTC_SERVICE_H

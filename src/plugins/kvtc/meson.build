@@ -17,11 +17,15 @@
 kvtc_sources = [
     'kvtc_service.cpp',
     'kvtc_plugin.cpp',
+    'host/host_client.cpp',
+    'common/doca_dev_utils.cpp',
 ]
 
 kvtc_deps = [
     nixl_infra,
     nixl_common_dep,
+    dependency('doca-common'),
+    dependency('doca-comch'),
 ]
 
 compile_flags = []
@@ -32,7 +36,7 @@ if 'KVTC' in static_plugins
         kvtc_sources,
         dependencies: kvtc_deps,
         cpp_args: compile_flags,
-        include_directories: [nixl_inc_dirs, utils_inc_dirs],
+        include_directories: [nixl_inc_dirs, utils_inc_dirs, include_directories('common', 'host')],
         install: false,
         name_prefix: 'libnixl_')
 else
@@ -40,7 +44,7 @@ else
         kvtc_sources,
         dependencies: kvtc_deps,
         cpp_args: ['-fPIC'],
-        include_directories: [nixl_inc_dirs, utils_inc_dirs],
+        include_directories: [nixl_inc_dirs, utils_inc_dirs, include_directories('common', 'host')],
         install: true,
         name_prefix: 'libnixl_',
         install_dir: plugin_install_dir,
