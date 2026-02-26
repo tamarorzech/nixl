@@ -19,8 +19,10 @@ from ._api import (
     nixl_agent_config,
     nixl_backend_handle,
     nixl_prepped_dlist_handle,
+    nixl_service_manager,
     nixl_xfer_handle,
 )
+from . import _bindings as _nixl_bindings  # type: ignore
 
 __all__ = [
     # Constants
@@ -30,5 +32,6 @@ __all__ = [
     "nixl_agent_config",
     "nixl_backend_handle",
     "nixl_prepped_dlist_handle",
+    "nixl_service_manager",
     "nixl_xfer_handle",
 ]
