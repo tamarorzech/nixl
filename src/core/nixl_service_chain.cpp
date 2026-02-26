@@ -18,6 +18,7 @@
 #include "nixl_service_chain.h"
 #include "nixl_types.h"
 #include "nixl_descriptors.h"
+#include "nixl_log.h"
 #include "backend/backend_aux.h"
 #include "common/nixl_log.h"
 #include "service/service_engine.h"

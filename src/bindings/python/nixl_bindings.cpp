@@ -24,6 +24,7 @@
 #include <iostream>
 
 #include "nixl.h"
+#include "nixl_service_chain.h"
 #include "serdes/serdes.h"
 
 namespace py = pybind11;
@@ -90,6 +91,27 @@ public:
     nixlNoTelemetryError(const char *what) : runtime_error(what) {}
 };
 
+// Service chain status exceptions
+class nixlServiceChainInvalidParamError : public std::runtime_error {
+public:
+    nixlServiceChainInvalidParamError(const char *what) : runtime_error(what) {}
+};
+
+class nixlServiceChainNotFoundError : public std::runtime_error {
+public:
+    nixlServiceChainNotFoundError(const char *what) : runtime_error(what) {}
+};
+
+class nixlServiceChainNotAllowedError : public std::runtime_error {
+public:
+    nixlServiceChainNotAllowedError(const char *what) : runtime_error(what) {}
+};
+
+class nixlServiceChainOperationFailedError : public std::runtime_error {
+public:
+    nixlServiceChainOperationFailedError(const char *what) : runtime_error(what) {}
+};
+
 void
 throw_nixl_exception(const nixl_status_t &status) {
     switch (status) {
@@ -135,6 +157,28 @@ throw_nixl_exception(const nixl_status_t &status) {
         break;
     default:
         throw std::runtime_error("BAD_STATUS");
+    }
+}
+
+void
+throw_service_chain_exception(nixlServiceChainStatus status) {
+    switch (status) {
+    case nixlServiceChainStatus::SUCCESS:
+        return;
+    case nixlServiceChainStatus::INVALID_PARAM:
+        throw nixlServiceChainInvalidParamError("Invalid parameter in service chain operation");
+        break;
+    case nixlServiceChainStatus::NOT_FOUND:
+        throw nixlServiceChainNotFoundError("Service not found in chain");
+        break;
+    case nixlServiceChainStatus::NOT_ALLOWED:
+        throw nixlServiceChainNotAllowedError("Service chain operation not allowed");
+        break;
+    case nixlServiceChainStatus::OPERATION_FAILED:
+        throw nixlServiceChainOperationFailedError("Service chain operation failed");
+        break;
+    default:
+        throw std::runtime_error("BAD_SERVICE_CHAIN_STATUS");
     }
 }
 
@@ -186,6 +230,16 @@ PYBIND11_MODULE(_bindings, m) {
         .value("NIXL_ERR_NOT_SUPPORTED", NIXL_ERR_NOT_SUPPORTED)
         .export_values();
 
+    py::enum_<nixlServiceChainStatus>(m, "nixlServiceChainStatus")
+        .value("SUCCESS", nixlServiceChainStatus::SUCCESS)
+        .value("INVALID_PARAM", nixlServiceChainStatus::INVALID_PARAM)
+        .value("NOT_FOUND", nixlServiceChainStatus::NOT_FOUND)
+        .value("NOT_ALLOWED", nixlServiceChainStatus::NOT_ALLOWED)
+        .value("OPERATION_FAILED", nixlServiceChainStatus::OPERATION_FAILED)
+        .export_values();
+
+    m.attr("NIXL_SERVICE_INPLACE") = py::int_(1);  // value of nixl_s_flags_t::NIXL_SERVICE_INPLACE
+
     py::class_<nixl_xfer_telem_t>(m, "nixlXferTelemetry")
         .def(py::init<>())
         .def_property_readonly("startTime",
@@ -214,6 +268,12 @@ PYBIND11_MODULE(_bindings, m) {
     py::register_exception<nixlRemoteDisconnectError>(m, "nixlRemoteDisconnectError");
     py::register_exception<nixlCancelledError>(m, "nixlCancelledError");
     py::register_exception<nixlNoTelemetryError>(m, "nixlNoTelemetryError");
+    py::register_exception<nixlServiceChainInvalidParamError>(m,
+                                                              "nixlServiceChainInvalidParamError");
+    py::register_exception<nixlServiceChainNotFoundError>(m, "nixlServiceChainNotFoundError");
+    py::register_exception<nixlServiceChainNotAllowedError>(m, "nixlServiceChainNotAllowedError");
+    py::register_exception<nixlServiceChainOperationFailedError>(
+        m, "nixlServiceChainOperationFailedError");
 
     py::class_<nixl_xfer_dlist_t>(m, "nixlXferDList")
         .def(py::init<nixl_mem_t, int>(), py::arg("type"), py::arg("init_size") = 0)
@@ -412,6 +472,68 @@ PYBIND11_MODULE(_bindings, m) {
                 nixl_reg_dlist_t newObj = nixl_reg_dlist_t(&serdes);
                 return newObj;
             }));
+
+    py::class_<nixlServiceChain>(m, "nixlServiceChain")
+        .def(py::init<>())
+        .def(
+            "addService",
+            [](nixlServiceChain &chain,
+               const nixl_service_t &service,
+               uint32_t flags,
+               const py::dict &custom_params) {
+                nixl_s_params_t params;
+                if (!custom_params.is_none()) {
+                    for (const auto &item : custom_params) {
+                        params[item.first.cast<std::string>()] = item.second.cast<std::string>();
+                    }
+                }
+                nixlServiceChainStatus status =
+                    chain.addService(service, flags, params.empty() ? nullptr : &params);
+                throw_service_chain_exception(status);
+            },
+            py::arg("service"),
+            py::arg("flags") = 0,
+            py::arg("custom_params") = py::dict())
+        .def(
+            "removeService",
+            [](nixlServiceChain &chain, const nixl_service_t &service) {
+                nixlServiceChainStatus status = chain.removeService(service);
+                throw_service_chain_exception(status);
+            },
+            py::arg("service"))
+        .def(
+            "operateServices",
+            [](nixlServiceChain &chain,
+               const nixl_xfer_op_t &operation,
+               const nixl_xfer_dlist_t &input_buffers,
+               py::object output_buffers) {
+                nixl_xfer_dlist_t *out_ptr = nullptr;
+                if (!output_buffers.is_none()) {
+                    try {
+                        auto &out_ref = output_buffers.cast<nixl_xfer_dlist_t &>();
+                        out_ptr = &out_ref;
+                    }
+                    catch (const py::cast_error &) {
+                        throw nixlServiceChainInvalidParamError(
+                            "output_buffers must be None or nixlXferDList");
+                    }
+                }
+                nixlServiceChainStatus status =
+                    chain.operateServices(operation, input_buffers, out_ptr);
+                throw_service_chain_exception(status);
+            },
+            py::arg("operation"),
+            py::arg("input_buffers"),
+            py::arg("output_buffers") = py::none())
+        .def("getServices",
+             [](const nixlServiceChain &chain) {
+                 std::vector<nixl_service_t> names;
+                 for (const auto *h : chain.getServices())
+                     names.push_back(h->getType());
+                 return names;
+             })
+        .def("size", &nixlServiceChain::size)
+        .def("empty", &nixlServiceChain::empty);
 
     py::class_<nixlAgentConfig>(m, "nixlAgentConfig")
         // implicit constructor
@@ -629,7 +751,9 @@ PYBIND11_MODULE(_bindings, m) {
                const nixl_xfer_dlist_t &remote_descs,
                const std::string &remote_agent,
                const std::string &notif_msg,
-               std::vector<uintptr_t> backends) -> uintptr_t {
+               std::vector<uintptr_t> backends,
+               py::object service_chain,
+               py::object processed_local_descs) -> uintptr_t {
                 nixlXferReqH *handle = nullptr;
                 nixl_opt_args_t extra_params;
 
@@ -640,8 +764,25 @@ PYBIND11_MODULE(_bindings, m) {
                     extra_params.notifMsg = notif_msg;
                     extra_params.hasNotif = true;
                 }
-                nixl_status_t ret = agent.createXferReq(
-                    operation, local_descs, remote_descs, remote_agent, handle, &extra_params);
+
+                nixlServiceChain *chain_ptr = nullptr;
+                if (!service_chain.is_none()) {
+                    chain_ptr = &service_chain.cast<nixlServiceChain &>();
+                }
+
+                const nixl_xfer_dlist_t *processed_ptr = nullptr;
+                if (!processed_local_descs.is_none()) {
+                    processed_ptr = &processed_local_descs.cast<nixl_xfer_dlist_t &>();
+                }
+
+                nixl_status_t ret = agent.createXferReq(operation,
+                                                        local_descs,
+                                                        remote_descs,
+                                                        remote_agent,
+                                                        handle,
+                                                        &extra_params,
+                                                        chain_ptr,
+                                                        processed_ptr);
 
                 throw_nixl_exception(ret);
                 return (uintptr_t)handle;
@@ -652,6 +793,8 @@ PYBIND11_MODULE(_bindings, m) {
             py::arg("remote_agent"),
             py::arg("notif_msg") = std::string(""),
             py::arg("backend") = std::vector<uintptr_t>({}),
+            py::arg("service_chain") = py::none(),
+            py::arg("processed_local_descs") = py::none(),
             py::call_guard<py::gil_scoped_release>())
         .def(
             "estimateXferCost",

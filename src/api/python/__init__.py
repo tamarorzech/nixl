@@ -19,16 +19,23 @@ from ._api import (
     nixl_agent_config,
     nixl_backend_handle,
     nixl_prepped_dlist_handle,
+    nixl_service_chain,
     nixl_xfer_handle,
 )
+from . import _bindings as _nixl_bindings  # type: ignore
+
+# Service chain flags (e.g. for add_service(..., flags=NIXL_SERVICE_INPLACE))
+NIXL_SERVICE_INPLACE = getattr(_nixl_bindings, "NIXL_SERVICE_INPLACE", 1)
 
 __all__ = [
     # Constants
     "DEFAULT_COMM_PORT",
+    "NIXL_SERVICE_INPLACE",
     # Main classes
     "nixl_agent",
     "nixl_agent_config",
     "nixl_backend_handle",
     "nixl_prepped_dlist_handle",
+    "nixl_service_chain",
     "nixl_xfer_handle",
 ]

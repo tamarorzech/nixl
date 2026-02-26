@@ -25,7 +25,6 @@
 
 #include "nixl_types.h"
 #include "nixl_descriptors.h"
-#include "nixl_log.h"
 
 // Initialization parameters for service engine
 struct nixlServiceInitParams {

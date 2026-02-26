@@ -119,6 +119,75 @@ nixl_backend_handle = int
 
 
 """
+@brief Service chain for applying a sequence of services to data before or during a transfer.
+       Build the chain with add_service(), optionally pass it to initialize_xfer(service_chain=...).
+       Can also be used standalone with operate_services() to run the chain on descriptor lists.
+"""
+
+
+class nixl_service_chain:
+    def __init__(self):
+        self._chain = nixlBind.nixlServiceChain()
+
+    """
+    @brief Add a service to the end of the chain.
+    @param service Service name (plugin name).
+    @param flags Optional flags (e.g. nixlBind.NIXL_SERVICE_INPLACE for in-place).
+    @param custom_params Optional dict of string key-value params for the service.
+    """
+
+    def add_service(
+        self,
+        service: str,
+        flags: int = 0,
+        custom_params: Optional[dict[str, str]] = None,
+    ):
+        self._chain.addService(service, flags, custom_params if custom_params else {})
+
+    """
+    @brief Remove the first occurrence of a service from the chain by name.
+    @param service Service name to remove.
+    """
+
+    def remove_service(self, service: str):
+        self._chain.removeService(service)
+
+    """
+    @brief Run all services in the chain on the input descriptors.
+    @param operation "READ" or "WRITE".
+    @param input_buffers nixlXferDList input descriptors.
+    @param output_buffers Optional nixlXferDList for out-of-place output; if None, in-place.
+    """
+
+    def operate_services(
+        self,
+        operation: str,
+        input_buffers: nixlBind.nixlXferDList,
+        output_buffers: Optional[nixlBind.nixlXferDList] = None,
+    ):
+        op = nixlBind.NIXL_WRITE if operation.upper() == "WRITE" else nixlBind.NIXL_READ
+        self._chain.operateServices(op, input_buffers, output_buffers)
+
+    """
+    @brief Return the list of service names in the chain (order preserved).
+    """
+
+    def get_services(self) -> list[str]:
+        return self._chain.getServices()
+
+    def size(self) -> int:
+        return self._chain.size()
+
+    def empty(self) -> bool:
+        return self._chain.empty()
+
+    @property
+    def chain(self):
+        """Internal binding object for passing to agent.createXferReq."""
+        return self._chain
+
+
+"""
 @brief Configuration class for NIXL agent.
 
 @param enable_prog_thread Whether to enable the progress thread, if available.
@@ -561,6 +630,8 @@ class nixl_agent:
     @param notif_msg Optional notification message.
            notif_msg should be bytes, as that is what will be returned to the target, but will work with str too.
     @param backends Optional list of backend names to limit which backends NIXL can use.
+    @param service_chain Optional nixl_service_chain to apply to the transfer.
+    @param processed_local_descs Optional output descriptor list for out-of-place service chain.
     @return Opaque handle for posting/checking transfer.
             The handle can be released by calling release_xfer_handle from agent, or release() method on itself.
     """
@@ -573,14 +644,24 @@ class nixl_agent:
         remote_agent: str,
         notif_msg: bytes = b"",
         backends: list[str] = [],
+        service_chain: Optional[nixl_service_chain] = None,
+        processed_local_descs: Optional[nixlBind.nixlXferDList] = None,
     ) -> nixl_xfer_handle:
         op = self.nixl_ops[operation]
         handle_list = []
         for backend_string in backends:
             handle_list.append(self.backends[backend_string])
 
+        chain_arg = service_chain.chain if service_chain else None
         handle = self.agent.createXferReq(
-            op, local_descs, remote_descs, remote_agent, notif_msg, handle_list
+            op,
+            local_descs,
+            remote_descs,
+            remote_agent,
+            notif_msg,
+            handle_list,
+            chain_arg,
+            processed_local_descs,
         )
 
         return nixl_xfer_handle(self.agent, handle)
@@ -1087,3 +1168,4 @@ class nixl_agent:
 
     def deserialize_descs(self, serialized_descs: bytes):
         return pickle.loads(serialized_descs)
+
