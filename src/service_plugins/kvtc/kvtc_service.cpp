@@ -97,83 +97,75 @@ nixlKvtcServiceEngine::~nixlKvtcServiceEngine() {
     }
 }
 
-nixl_mem_list_t nixlKvtcServiceEngine::getSupportedMems() const {
-    // Support all memory types since this is a dummy in-place service
-    return {DRAM_SEG, VRAM_SEG, BLK_SEG, OBJ_SEG, FILE_SEG};
+size_t nixlKvtcServiceEngine::GetMaxBuffersize(size_t input_size, nixl_xfer_op_t op) const {
+    // WRITE path (compress): CAT_X2 halves the data, but allocate the full input size
+    // as the worst case (incompressible data).
+    // READ path (decompress): output can be up to 2x the compressed input size.
+    return input_size; // worst-case: full expansion
 }
 
-nixl_status_t nixlKvtcServiceEngine::processData(const nixl_xfer_op_t &operation,
-                                                  const std::vector<nixlBlobDesc> &data_descs,
-                                                  const std::vector<nixlBlobDesc> &processed_data_descs) {
-    // Dummy implementation - does nothing, operates in-place
-    (void)operation;  // Suppress unused warning
-    (void)data_descs; // Suppress unused warning
-    (void)processed_data_descs; // Suppress unused warning
+nixl_status_t nixlKvtcServiceEngine::processDataAsync(const nixl_xfer_op_t &operation,
+                                                       const std::vector<nixlBlobDesc> &data_descs) {
+    if (client_ == nullptr) {
+        NIXL_ERROR << "KVTC: HostClient not initialized";
+        return NIXL_ERR_BACKEND;
+    }
 
-    NIXL_DEBUG << "KVTC service processData called (no-op) for " 
-               << data_descs.size() << " descriptor(s)";
-    
     if (operation == NIXL_WRITE) {
-        try {
-            // Prepare source data: random string, size 40960 * sizeof(float)
-            // constexpr size_t float_size = sizeof(float);
-            for (size_t i = 0; i < data_descs.size(); i++) {
-                std::cout << "\nSending compression request:\n";
-                std::cout << "  Source size: " << data_descs[i].len << " bytes\n";
+        // Submit compression tasks for each descriptor; return immediately.
+        for (size_t i = 0; i < data_descs.size(); i++) {
+            void* dest_buf = reinterpret_cast<void*>(data_descs[i].addr);
 
-                void* dest_buf = nullptr;
-                if (processed_data_descs.size() > 0) {
-                    dest_buf = reinterpret_cast<void*>(processed_data_descs[i].addr);
-                } else {
-                    dest_buf = reinterpret_cast<void*>(data_descs[i].addr);
-                }
-                
-                if (client_ == nullptr) {
-                    std::cerr << "Error: HostClient not initialized\n";
-                    return NIXL_ERR_BACKEND;
-                }
+            NIXL_DEBUG << "KVTC: submitting compress task, src=" << data_descs[i].addr
+                       << " size=" << data_descs[i].len;
+            try {
                 client_->CreateAndSubmitCompSendTask(
-                    reinterpret_cast<void*>(data_descs[i].addr), data_descs[i].len, dest_buf, CompType::COMP_TYPE_CAT_X2);
-
-                std::cout << "Request submitted. Waiting for response...\n";
-
-                // Poll for completion (simple demo polling loop)
-                auto start_time = std::chrono::steady_clock::now();
-                // size_t expected_size = source_size / 2; // CAT_X2 halves the size
-                
-                auto elapsed = std::chrono::steady_clock::now() - start_time;
-                int count = 0;
-                while (client_->poll()) {            
-                    std::cout << ++count << std::endl;
-                    std::this_thread::sleep_for(POLL_INTERVAL);
-                    elapsed = std::chrono::steady_clock::now() - start_time;
-                    std::this_thread::sleep_for(std::chrono::seconds(3));
-                }
-                // if (elapsed > TIMEOUT) {
-                //     std::cerr << "Timeout reached. Dest buffer contents:\n";
-                //     return 1;
-                // }
-                std::cout << "count = " << count << std::endl;
-                std::cout << "Response received. Dest buffer contents:\n";
-                std::this_thread::sleep_for(std::chrono::seconds(10));
-
-                float* dest_buf_f = reinterpret_cast<float*>(dest_buf);
-                size_t dest_buf_count = data_descs[i].len / sizeof(float);
-                for (size_t i = 0; i < std::min(static_cast<size_t>(256), dest_buf_count); ++i) {
-                    std::cout << dest_buf_f[i];
-                    if ((i + 1) % 8 == 0) {
-                        std::cout << "\n";
-                    } else {
-                        std::cout << "\t";
-                    }
-                }
-                std::cout << "\n";
+                    reinterpret_cast<void*>(data_descs[i].addr),
+                    data_descs[i].len,
+                    dest_buf,
+                    CompType::COMP_TYPE_CAT_X2);
+            } catch (const std::exception &e) {
+                NIXL_ERROR << "KVTC: task submission failed: " << e.what();
+                return NIXL_ERR_BACKEND;
             }
         }
-        catch (const std::exception &e) {
-            std::cerr << "Error: " << e.what() << "\n";
-            return NIXL_ERR_BACKEND;
+    } else {
+        // READ path: decompression — submit tasks similarly.
+        for (size_t i = 0; i < data_descs.size(); i++) {
+            void* dest_buf = reinterpret_cast<void*>(data_descs[i].addr);
+
+            NIXL_DEBUG << "KVTC: submitting decompress task, src=" << data_descs[i].addr
+                       << " size=" << data_descs[i].len;
+            try {
+                client_->CreateAndSubmitCompSendTask(
+                    reinterpret_cast<void*>(data_descs[i].addr),
+                    data_descs[i].len,
+                    dest_buf,
+                    CompType::COMP_TYPE_CAT_X2);
+            } catch (const std::exception &e) {
+                NIXL_ERROR << "KVTC: task submission failed: " << e.what();
+                return NIXL_ERR_BACKEND;
+            }
         }
     }
+
+    // Tasks submitted asynchronously; caller must poll via pollProcessData().
+    return NIXL_IN_PROG;
+}
+
+nixl_status_t nixlKvtcServiceEngine::pollProcessData() {
+    if (client_ == nullptr) {
+        NIXL_ERROR << "KVTC: HostClient not initialized";
+        return NIXL_ERR_BACKEND;
+    }
+
+    // client_->poll() returns true if there are still pending completions,
+    // false when all submitted tasks have completed.
+    bool pending = client_->poll();
+    if (pending) {
+        return NIXL_IN_PROG;
+    }
+
+    NIXL_DEBUG << "KVTC: all tasks completed";
     return NIXL_SUCCESS;
 }

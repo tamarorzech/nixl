@@ -28,7 +28,8 @@ class nixlDlistH;
 class nixlBackendH;
 class nixlXferReqH;
 class nixlAgentData;
-class nixlServiceChain;
+class nixlServiceH;
+class nixlServiceManager;
 
 
 /*** NIXL memory type, operation and status enums ***/
@@ -193,13 +194,12 @@ struct nixlAgentOptionalArgs {
     std::vector<nixlBackendH*> backends;
 
     /**
-     * @var serviceChain Service chain to specify an ordered list of service engines
-     *      to apply sequentially before a transfer. Used in createXferReq / makeXferReq.
-     *      Services are created via nixlService::createService() before the transfer.
-     *      The chain validates service order concerning memory type and service conditions.
+     * @var serviceH Service handle to apply before a transfer. Used in createXferReq / makeXferReq.
+     *      Services are created via nixlServiceManager::createService() before the transfer.
+     *      The handle must remain valid for the lifetime of all requests that reference it.
+     *      The agent does NOT take ownership of the handle.
      */
-     // TODO: change to forward declaration and use pointer instead of object
-    nixlServiceChain* serviceChain;
+    nixlServiceH* serviceH;
 
     /**
      * @var notifMsg A message to be used in createXferReq / makeXferReq / postXferReq,

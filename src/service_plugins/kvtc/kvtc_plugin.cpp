@@ -28,13 +28,10 @@ NIXL_SERVICE_PLUGIN_EXPORT nixlServicePlugin*
 nixl_service_plugin_init() {
     if (!plugin_instance) {
         // Define plugin parameters
-        nixl_b_params_t params = {
-            {"in_place", "true"},
-            {"description", "KVTC dummy in-place service"}
-        };
+        nixl_b_params_t params = {};
 
-        // Define supported memory types (all types for dummy service)
-        nixl_mem_list_t mem_list = {DRAM_SEG, VRAM_SEG, BLK_SEG, OBJ_SEG, FILE_SEG};
+        // Define supported memory types
+        nixl_mem_list_t mem_list = {DRAM_SEG};
 
         // Create the plugin using the template creator
         plugin_instance = nixlServicePluginCreator<nixlKvtcServiceEngine>::create(

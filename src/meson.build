@@ -19,6 +19,7 @@ subdir('utils')
 
 #subdir('arch')
 subdir('infra')
+subdir('service_plugins')
 subdir('plugins')
 subdir('core')
 

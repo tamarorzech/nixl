@@ -142,6 +142,9 @@ public:
     void
     loadPluginsFromList(const std::string &filename);
 
+    void
+    loadServicePluginsFromList(const std::string &filename);
+
     // Load a specific backend plugin
     std::shared_ptr<const nixlBackendPluginHandle>
     loadBackendPlugin(const nixl_backend_t &plugin_name);
@@ -212,6 +215,7 @@ private:
     std::map<std::string, std::shared_ptr<const nixlServicePluginHandle>>
         loaded_service_plugins_;
     std::vector<std::string> plugin_dirs_;
+    std::vector<std::string> service_plugin_dirs_;
     std::vector<nixlBackendStaticPluginInfo> backend_static_plugins_;
     std::vector<nixlTelemetryStaticPluginInfo> telemetry_static_plugins_;
     std::vector<nixlServiceStaticPluginInfo> service_static_plugins_;
@@ -230,6 +234,10 @@ private:
     // Search a directory for plugins
     void
     discoverPluginsFromDir(const std::filesystem::path &dirpath);
+
+    // Search a directory for service plugins only
+    void
+    discoverServicePluginsFromDir(const std::filesystem::path &dirpath);
 
     // Discover helper functions
     void

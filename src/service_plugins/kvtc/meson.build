@@ -47,11 +47,11 @@ else
         include_directories: [nixl_inc_dirs, utils_inc_dirs, include_directories('common', 'host')],
         install: true,
         name_prefix: 'libnixl_',
-        install_dir: plugin_install_dir,
+        install_dir: service_plugin_install_dir,
         install_rpath: '$ORIGIN/..')
     if get_option('buildtype') == 'debug'
         run_command('sh', '-c',
-            'echo "kvtc=' + kvtc_service_lib.full_path() + '" >> ' + plugin_build_dir + '/pluginlist',
+            'echo "kvtc=' + kvtc_service_lib.full_path() + '" >> ' + plugin_build_dir + '/service_pluginlist',
             check: true
         )
     endif

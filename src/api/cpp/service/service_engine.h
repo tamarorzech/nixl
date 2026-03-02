@@ -21,28 +21,25 @@
 #include <mutex>
 #include <string>
 #include <vector>
-#include <cstdint>
-
 #include "nixl_types.h"
 #include "nixl_descriptors.h"
-#include "nixl_log.h"
 
 // Initialization parameters for service engine
 struct nixlServiceInitParams {
     nixl_service_t type;                // Service type
-    uint32_t flags;                     // Service flags
-    const nixl_b_params_t* customParams; // Custom parameters
+    const nixl_s_params_t* customParams; // Custom parameters
 };
 
 // Base service engine class for different service implementations
 class nixlServiceEngine {
 private:
     nixl_service_t serviceType_;
-    nixl_b_params_t customParams_;
+    nixl_mem_list_t inputMems_;
+    nixl_mem_list_t outputMems_;
+    nixl_s_params_t customParams_;
 
 protected:
     bool initErr = false;
-    uint32_t flags_;
 
     [[nodiscard]] nixl_status_t
     setInitParam(const std::string &key, const std::string &value) {
@@ -65,8 +62,7 @@ protected:
 public:
     explicit nixlServiceEngine(const nixlServiceInitParams* init_params)
         : serviceType_(init_params->type),
-          customParams_(init_params->customParams ? *init_params->customParams : nixl_b_params_t{}),
-          flags_(init_params->flags) {}
+          customParams_(init_params->customParams ? *init_params->customParams : nixl_s_params_t{}) {}
 
     nixlServiceEngine(nixlServiceEngine&&) = delete;
     nixlServiceEngine(const nixlServiceEngine&) = delete;
@@ -77,23 +73,27 @@ public:
 
     bool getInitErr() const noexcept { return initErr; }
     const nixl_service_t& getType() const noexcept { return serviceType_; }
-    uint32_t getFlags() const noexcept { return flags_; }
-    const nixl_b_params_t& getCustomParams() const noexcept { return customParams_; }
-
-    // Check if service supports in-place operation
-    bool supportsInplace() const noexcept {
-        return (flags_ & NIXL_SERVICE_INPLACE) != 0;
-    }
+    const nixl_s_params_t& getCustomParams() const noexcept { return customParams_; }
 
     // *** Pure virtual methods that need to be implemented by any service *** //
 
-    // Get supported memory types
-    virtual nixl_mem_list_t getSupportedMems() const = 0;
+    // Get supported input/output memory types
+    const nixl_mem_list_t& getSupportedInputMems() const noexcept { return inputMems_; }
+    const nixl_mem_list_t& getSupportedOutputMems() const noexcept { return outputMems_; }
 
-    // Process data buffers based on operation
-    virtual nixl_status_t processData(const nixl_xfer_op_t &operation,
-                                     const std::vector<nixlBlobDesc> &data_descs,
-                                     const std::vector<nixlBlobDesc> &processed_data_descs) = 0;
+    // Return the worst-case output buffer size for a given input size and operation.
+    // op: NIXL_WRITE (encode path) or NIXL_READ (decode path)
+    virtual size_t GetMaxBuffersize(size_t input_size, nixl_xfer_op_t op) const = 0;
+
+    // Initiate an asynchronous data transformation.
+    // Returns NIXL_IN_PROG if the operation was submitted and is in flight,
+    // or NIXL_SUCCESS if it completed immediately.
+    virtual nixl_status_t processDataAsync(const nixl_xfer_op_t &operation,
+                                           const std::vector<nixlBlobDesc> &data_descs) = 0;
+
+    // Poll the status of the in-flight async operation.
+    // Returns NIXL_IN_PROG while busy, NIXL_SUCCESS when complete.
+    virtual nixl_status_t pollProcessData() = 0;
 
 };
 

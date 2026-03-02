@@ -269,6 +269,37 @@ nixlPluginManager::loadPluginsFromList(const std::string &filename) {
     }
 }
 
+void
+nixlPluginManager::loadServicePluginsFromList(const std::string &filename) {
+    auto plugins = loadPluginList(filename);
+
+    for (const auto& pair : plugins) {
+        const std::string& name = pair.first;
+        const std::string& path = pair.second;
+
+        auto plugin_handle = loadServicePlugin(name);
+        if (!plugin_handle) {
+            // Try direct path load
+            auto loader = [](void *dlhandle, const std::string &p) -> std::shared_ptr<const nixlPluginHandle> {
+                auto init_func = (nixlServicePlugin * (*)()) dlsym(dlhandle, "nixl_service_plugin_init");
+                if (!init_func) {
+                    NIXL_ERROR << "Failed to find nixl_service_plugin_init in " << p;
+                    return nullptr;
+                }
+                nixlServicePlugin *plugin = init_func();
+                if (!plugin) return nullptr;
+                return std::make_shared<nixlServicePluginHandle>(dlhandle, plugin);
+            };
+            auto handle = loadPluginFromPath(path, loader);
+            if (handle) {
+                auto service_handle = std::dynamic_pointer_cast<const nixlServicePluginHandle>(handle);
+                lock_guard lg(lock);
+                loaded_service_plugins_[name] = service_handle;
+            }
+        }
+    }
+}
+
 namespace {
 static std::string
 getPluginDir() {
@@ -286,6 +317,23 @@ getPluginDir() {
     }
     return (std::filesystem::path(info.dli_fname).parent_path() / "plugins").string();
 }
+
+static std::string
+getServicePluginDir() {
+    // Environment variable takes precedence
+    const char *plugin_dir = getenv("NIXL_SERVICE_PLUGIN_DIR");
+    if (plugin_dir) {
+        return plugin_dir;
+    }
+    // By default, use the service_plugins directory relative to the binary
+    Dl_info info;
+    int ok = dladdr(reinterpret_cast<void *>(&getServicePluginDir), &info);
+    if (!ok) {
+        NIXL_ERROR << "Failed to get service plugin directory from dladdr";
+        return "";
+    }
+    return (std::filesystem::path(info.dli_fname).parent_path() / "service_plugins").string();
+}
 } // namespace
 
 // PluginManager implementation
@@ -299,11 +347,26 @@ nixlPluginManager::nixlPluginManager() {
     }
 #endif
 
+#ifdef NIXL_USE_SERVICE_PLUGIN_FILE
+    NIXL_DEBUG << "Loading service plugins from file: " << NIXL_USE_SERVICE_PLUGIN_FILE;
+    std::string service_plugin_file = NIXL_USE_SERVICE_PLUGIN_FILE;
+    if (std::filesystem::exists(service_plugin_file)) {
+        loadServicePluginsFromList(service_plugin_file);
+    }
+#endif
+
     std::string plugin_dir = getPluginDir();
     if (!plugin_dir.empty()) {
         NIXL_DEBUG << "Loading plugins from: " << plugin_dir;
         plugin_dirs_.insert(plugin_dirs_.begin(), plugin_dir);
         discoverPluginsFromDir(plugin_dir);
+    }
+
+    std::string service_plugin_dir = getServicePluginDir();
+    if (!service_plugin_dir.empty()) {
+        NIXL_DEBUG << "Loading service plugins from: " << service_plugin_dir;
+        service_plugin_dirs_.insert(service_plugin_dirs_.begin(), service_plugin_dir);
+        discoverServicePluginsFromDir(service_plugin_dir);
     }
 
     registerBuiltinPlugins();
@@ -768,8 +831,8 @@ nixlPluginManager::loadServicePlugin(const std::string &plugin_name) {
         return std::make_shared<nixlServicePluginHandle>(dlhandle, plugin);
     };
 
-    // Search for plugin in plugin directories
-    for (const auto &dir : plugin_dirs_) {
+    // Search for plugin in service plugin directories
+    for (const auto &dir : service_plugin_dirs_) {
         std::string plugin_path = composePluginPath(dir, "libnixl_service_", plugin_name);
         if (access(plugin_path.c_str(), F_OK) == 0) {
             auto handle = loadPluginFromPath(plugin_path, loader);
@@ -835,6 +898,21 @@ nixlPluginManager::registerServiceStaticPlugin(const std::string_view &name,
                                               nixlStaticServicePluginCreatorFunc creator) {
     service_static_plugins_.push_back({std::string(name).c_str(), creator});
     NIXL_INFO << "Registered static service plugin: " << name;
+}
+
+void
+nixlPluginManager::discoverServicePluginsFromDir(const std::filesystem::path &dirpath) {
+    std::error_code ec;
+    std::filesystem::directory_iterator dir_iter(dirpath, ec);
+    if (ec) {
+        NIXL_ERROR << "Error accessing service plugin directory(" << dirpath << "): " << ec.message();
+        return;
+    }
+
+    for (const auto& entry : dir_iter) {
+        std::string filename = entry.path().filename().string();
+        discoverServicePlugin(filename);
+    }
 }
 
 void

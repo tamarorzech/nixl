@@ -120,11 +120,6 @@ if enabled_plugins.get('GPUNETIO')
     endif
 endif
 
-# KVTC service plugin - always available, no external dependencies
-if enabled_plugins.get('KVTC')
-    subdir('kvtc')
-endif
-
 subdir('telemetry')
 
 # Create a unified plugins directory for easier discovery during development

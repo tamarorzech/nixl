@@ -21,7 +21,7 @@
 #include <numeric>
 
 #include "nixl.h"
-#include "nixl_service_chain.h"
+#include "nixl_service_manager.h"
 #include "serdes/serdes.h"
 #include "backend/backend_engine.h"
 #include "transfer_request.h"
@@ -854,8 +854,8 @@ nixlAgent::createXferReq(const nixl_xfer_op_t &operation,
                          const std::string &remote_agent,
                          nixlXferReqH* &req_hndl,
                          const nixl_opt_args_t* extra_params,
-                         nixlServiceChain* service_chain,
-                         const nixl_xfer_dlist_t* processed_local_descs) const {
+                         nixlServiceH* service_h,
+                         const nixl_s_params_t* service_meta) const {
     nixl_status_t     ret1, ret2;
     nixl_opt_b_args_t opt_args;
 
@@ -922,26 +922,11 @@ nixlAgent::createXferReq(const nixl_xfer_op_t &operation,
 
     handle->targetDescs = new nixl_meta_dlist_t(remote_descs.getType());
     
-    // Allocate processedInitiatorDescs BEFORE using it (out-of-place mode)
-    if (processed_local_descs && processed_local_descs->descCount() > 0) {
-        handle->processedInitiatorDescs = new nixl_meta_dlist_t(processed_local_descs->getType());
-    }
-
     // Currently we loop through and find first local match. Can use a
     // preference list or more exhaustive search.
     for (auto & backend : *backend_set) {
-        // If populate fails, it clears the resp before return
-        if (processed_local_descs && processed_local_descs->descCount() > 0) {
-            for (int i = 0; i < local_descs.descCount(); i++) {
-                const auto& desc = local_descs[i];
-                handle->initiatorDescs->addDesc(nixlMetaDesc(desc.addr, desc.len, desc.devId, nullptr));
-            }
-            ret1 = data->memorySection->populate(
-                         *processed_local_descs, backend, *handle->processedInitiatorDescs);
-        } else {
-            ret1 = data->memorySection->populate(
-                         local_descs, backend, *handle->initiatorDescs);
-        }
+        ret1 = data->memorySection->populate(
+            local_descs, backend, *handle->initiatorDescs);
         ret2 = data->remoteSections[remote_agent]->populate(
                      remote_descs, backend, *handle->targetDescs);
 
@@ -959,17 +944,11 @@ nixlAgent::createXferReq(const nixl_xfer_op_t &operation,
         return NIXL_ERR_NOT_FOUND;
     }
 
-    // Only apply service chain to storage backends (local-only)
-    if (service_chain && service_chain->size() > 0) {
-        if (handle->engine->supportsLocal() && !handle->engine->supportsRemote()) {
-            handle->service_chain = service_chain;
-            NIXL_DEBUG << "Service chain assigned for storage backend with " 
-                    << service_chain->size() << " service(s)";
-        } else {
-            NIXL_ERROR_FUNC << "service chain is not supported for remote backends";
-            data->addErrorTelemetry(NIXL_ERR_NOT_ALLOWED);
-            return NIXL_ERR_NOT_ALLOWED;
-        }
+    // Attach the optional service handle (not owned by agent)
+    if (service_h != nullptr) {
+        handle->service_h = service_h;
+        NIXL_DEBUG << "Service handle assigned: " << service_h->getType();
+        handle->service_meta = service_meta;
     }
 
     if (extra_params) {
@@ -994,27 +973,18 @@ nixlAgent::createXferReq(const nixl_xfer_op_t &operation,
     handle->status = NIXL_ERR_NOT_POSTED;
     handle->notifMsg = opt_args.notifMsg;
     handle->hasNotif = opt_args.hasNotif;
-  
+
     if (data->telemetryEnabled) {
         handle->telemetry.totalBytes = total_bytes;
         handle->telemetry.descCount = handle->initiatorDescs->descCount();
     }
 
-    if (processed_local_descs && processed_local_descs->descCount() > 0) {
-        ret1 = handle->engine->prepXfer (handle->backendOp,
-                                     *handle->processedInitiatorDescs,
-                                     *handle->targetDescs,
-                                     handle->remoteAgent,
-                                     handle->backendHandle,
-                                     &opt_args);
-    } else {
-        ret1 = handle->engine->prepXfer (handle->backendOp,
-                                        *handle->initiatorDescs,
-                                        *handle->targetDescs,
-                                        handle->remoteAgent,
-                                        handle->backendHandle,
-                                        &opt_args);
-    }
+    ret1 = handle->engine->prepXfer (handle->backendOp,
+                                    *handle->initiatorDescs,
+                                    *handle->targetDescs,
+                                    handle->remoteAgent,
+                                    handle->backendHandle,
+                                    &opt_args);
     if (ret1 != NIXL_SUCCESS) {
         NIXL_ERROR_FUNC << "backend '" << handle->engine->getType()
                         << "' failed to prepare the transfer request with status " << ret1;
@@ -1137,21 +1107,38 @@ nixlAgent::postXferReq(nixlXferReqH *req_hndl,
         return NIXL_ERR_BACKEND;
     }
 
-    // Apply service chain if present
-    if (req_hndl->service_chain != nullptr && req_hndl->service_chain->size() > 0) {
-        NIXL_INFO << "Applying service chain with " << req_hndl->service_chain->size() << " service(s)";
-        
-        nixlServiceChainStatus chain_status = req_hndl->service_chain->operateServices(req_hndl->backendOp, *req_hndl->initiatorDescs, 
-                                                                                       req_hndl->processedInitiatorDescs);
-        if (chain_status != nixlServiceChainStatus::SUCCESS) {
-            NIXL_ERROR << "Service chain processing failed with status " << static_cast<int>(chain_status);
+    // Kick off async service processing if a service handle is attached
+    if (req_hndl->service_h != nullptr) {
+        NIXL_INFO << "Starting async service processing: " << req_hndl->service_h->getType();
+
+        // Convert initiator descriptors to blob descriptors for the service engine.
+        // The service always operates in-place; no separate processed-buffer is needed.
+        std::vector<nixlBlobDesc> data_blobs;
+        for (int i = 0; i < req_hndl->initiatorDescs->descCount(); i++) {
+            const auto &d = (*req_hndl->initiatorDescs)[i];
+            data_blobs.emplace_back(d.addr, d.len, d.devId, nixl_blob_t{});
+        }
+
+        nixl_status_t svc_status = req_hndl->service_h->processDataAsync(
+            req_hndl->backendOp, data_blobs);
+
+        if (svc_status < 0) {
+            NIXL_ERROR << "Service processDataAsync failed with status " << svc_status;
             data->addErrorTelemetry(NIXL_ERR_BACKEND);
             return NIXL_ERR_BACKEND;
         }
-        
-        NIXL_INFO << "Service chain processing completed successfully";
+
+        if (svc_status == NIXL_IN_PROG) {
+            // Service is running asynchronously; backend post will happen in getXferStatus
+            req_hndl->service_phase_pending = true;
+            req_hndl->status = NIXL_IN_PROG;
+            return NIXL_IN_PROG;
+        }
+        // svc_status == NIXL_SUCCESS: service completed immediately, fall through to backend
+        req_hndl->service_phase_pending = false;
+        NIXL_INFO << "Service completed immediately";
     }
-    
+
     // If status is not NIXL_IN_PROG we can repost,
     req_hndl->status = req_hndl->engine->postXfer(req_hndl->backendOp,
                                                   *req_hndl->initiatorDescs,
@@ -1192,32 +1179,76 @@ nixl_status_t
 nixlAgent::getXferStatus (nixlXferReqH *req_hndl) const {
 
     NIXL_SHARED_LOCK_GUARD(data->lock);
-    // If the status is done, no need to recheck and no state changes.
-    // Same for users incorrectly recalling this method in error/done.
-    if (req_hndl->status == NIXL_IN_PROG) {
-        // Check if the remote was invalidated before completion
-        if (data->remoteSections.count(req_hndl->remoteAgent) == 0) {
-            NIXL_ERROR_FUNC << "remote agent '" << req_hndl->remoteAgent
-                            << "' was invalidated during transfer";
-            return NIXL_ERR_NOT_FOUND;
-        }
+    // If the status is done (success or error), no need to recheck.
+    if (req_hndl->status != NIXL_IN_PROG) {
+        return req_hndl->status;
+    }
 
-        req_hndl->status = req_hndl->engine->checkXfer(req_hndl->backendHandle);
-        if (req_hndl->status < 0) {
-            if (req_hndl->status == NIXL_ERR_REMOTE_DISCONNECT) {
-                data->invalidateRemoteData(req_hndl->remoteAgent);
-                return NIXL_ERR_REMOTE_DISCONNECT;
-            } else {
-                NIXL_ERROR_FUNC << "backend '" << req_hndl->engine->getType()
-                                << "' returned error status " << req_hndl->status;
-            }
+    // --- Service phase: poll until service completes, then post to backend ---
+    if (req_hndl->service_phase_pending) {
+        nixl_status_t svc_status = req_hndl->service_h->pollProcessData();
+        if (svc_status == NIXL_IN_PROG) {
+            return NIXL_IN_PROG;
         }
-        if (data->telemetryEnabled) {
-            if (req_hndl->status == NIXL_SUCCESS) {
-                req_hndl->updateRequestStats(data->telemetry_, NIXL_TELEMETRY_FINISH);
-            } else if (req_hndl->status < 0) {
-                data->addErrorTelemetry(req_hndl->status);
-            }
+        if (svc_status < 0) {
+            NIXL_ERROR_FUNC << "Service pollProcessData returned error " << svc_status;
+            req_hndl->status = NIXL_ERR_BACKEND;
+            data->addErrorTelemetry(NIXL_ERR_BACKEND);
+            return req_hndl->status;
+        }
+        // Service complete: transition to backend phase
+        req_hndl->service_phase_pending = false;
+        NIXL_INFO << "Service completed; posting to backend";
+
+        // Build opt_args for backend post
+        nixl_opt_b_args_t opt_args;
+        opt_args.hasNotif = req_hndl->hasNotif;
+        opt_args.notifMsg = req_hndl->notifMsg;
+
+        req_hndl->status = req_hndl->engine->postXfer(
+            req_hndl->backendOp,
+            *req_hndl->initiatorDescs,
+            *req_hndl->targetDescs,
+            req_hndl->remoteAgent,
+            req_hndl->backendHandle,
+            &opt_args);
+
+        if (req_hndl->status < 0) {
+            NIXL_ERROR_FUNC << "backend post after service failed: " << req_hndl->status;
+            data->addErrorTelemetry(req_hndl->status);
+            return req_hndl->status;
+        }
+        if (data->telemetryEnabled && req_hndl->status != NIXL_IN_PROG) {
+            req_hndl->updateRequestStats(data->telemetry_, NIXL_TELEMETRY_POST_AND_FINISH);
+        } else if (data->telemetryEnabled) {
+            req_hndl->updateRequestStats(data->telemetry_, NIXL_TELEMETRY_POST);
+        }
+        return req_hndl->status;
+    }
+
+    // --- Backend phase: poll backend ---
+    // Check if the remote was invalidated before completion
+    if (data->remoteSections.count(req_hndl->remoteAgent) == 0) {
+        NIXL_ERROR_FUNC << "remote agent '" << req_hndl->remoteAgent
+                        << "' was invalidated during transfer";
+        return NIXL_ERR_NOT_FOUND;
+    }
+
+    req_hndl->status = req_hndl->engine->checkXfer(req_hndl->backendHandle);
+    if (req_hndl->status < 0) {
+        if (req_hndl->status == NIXL_ERR_REMOTE_DISCONNECT) {
+            data->invalidateRemoteData(req_hndl->remoteAgent);
+            return NIXL_ERR_REMOTE_DISCONNECT;
+        } else {
+            NIXL_ERROR_FUNC << "backend '" << req_hndl->engine->getType()
+                            << "' returned error status " << req_hndl->status;
+        }
+    }
+    if (data->telemetryEnabled) {
+        if (req_hndl->status == NIXL_SUCCESS) {
+            req_hndl->updateRequestStats(data->telemetry_, NIXL_TELEMETRY_FINISH);
+        } else if (req_hndl->status < 0) {
+            data->addErrorTelemetry(req_hndl->status);
         }
     }
 

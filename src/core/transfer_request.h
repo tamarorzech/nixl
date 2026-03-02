@@ -41,7 +41,9 @@ class nixlXferReqH {
         nixl_meta_dlist_t* initiatorDescs = nullptr;
         nixl_meta_dlist_t* targetDescs    = nullptr;
         
-        nixlServiceChain*  service_chain  = nullptr;
+        nixlServiceH*      service_h      = nullptr;     // service handle (not owned by agent)
+        const nixl_s_params_t*   service_meta   = nullptr;     // service metadata
+        bool               service_phase_pending = false; // true while service is in-flight
         nixl_meta_dlist_t* processedInitiatorDescs = nullptr;
 
         std::string        remoteAgent;
