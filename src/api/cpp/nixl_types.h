@@ -22,13 +22,14 @@
 #include <optional>
 #include <chrono>
 
-
 /*** Forward declarations ***/
 class nixlSerDes;
 class nixlDlistH;
 class nixlBackendH;
 class nixlXferReqH;
 class nixlAgentData;
+class nixlServiceH;
+class nixlServiceManager;
 
 
 /*** NIXL memory type, operation and status enums ***/
@@ -45,6 +46,14 @@ enum nixl_mem_t {DRAM_SEG, VRAM_SEG, BLK_SEG, OBJ_SEG, FILE_SEG};
  * @brief  An enumeration of different transfer types for NIXL
  */
 enum nixl_xfer_op_t {NIXL_READ, NIXL_WRITE};
+
+/**
+ * @enum   nixl_s_flags_t
+ * @brief  Flags for service operations
+ */
+enum nixl_s_flags_t {
+    NIXL_SERVICE_INPLACE = 1 << 0,  // Operate in-place
+};
 
 /**
  * @enum   nixl_status_t
@@ -98,6 +107,11 @@ namespace nixlEnumStrings {
 using nixl_backend_t = std::string;
 
 /**
+ * @brief A typedef for a std::string to identify nixl services
+ */
+ using nixl_service_t = std::string;
+
+/**
  * @brief A typedef for a std::string to identify nixl telemetry plugins
  */
 using nixl_telemetry_plugin_t = std::string;
@@ -120,6 +134,12 @@ using nixl_mem_list_t = std::vector<nixl_mem_t>;
  *        to hold nixl_b_params_t .
  */
 using nixl_b_params_t = std::unordered_map<std::string, std::string>;
+
+/**
+ * @brief A typedef for a  std::unordered_map<std::string, std::string>
+ *        to hold nixl_s_params_t .
+ */
+ using nixl_s_params_t = std::unordered_map<std::string, std::string>;
 
 /**
  * @brief A typedef for a  std::unordered_map<std::string, std::vector<nixl_blob_t>>
@@ -172,6 +192,14 @@ struct nixlAgentOptionalArgs {
      *      makeConnection / prepXferDlist / makeXferReq / createXferReq / GetNotifs / GenNotif
      */
     std::vector<nixlBackendH*> backends;
+
+    /**
+     * @var serviceH Service handle to apply before a transfer. Used in createXferReq / makeXferReq.
+     *      Services are created via nixlServiceManager::createService() before the transfer.
+     *      The handle must remain valid for the lifetime of all requests that reference it.
+     *      The agent does NOT take ownership of the handle.
+     */
+    nixlServiceH* serviceH;
 
     /**
      * @var notifMsg A message to be used in createXferReq / makeXferReq / postXferReq,

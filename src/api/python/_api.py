@@ -119,6 +119,76 @@ nixl_backend_handle = int
 
 
 """
+@brief Manager for service plugin lifecycle.
+
+Wraps nixlServiceManager to provide discovery, instantiation, and destruction
+of service handles. A handle returned by create_service() must be passed to
+initialize_xfer(service_h=...) and eventually destroyed with destroy_service().
+
+Example usage:
+    svc_mgr = nixl_service_manager()
+    params = svc_mgr.get_plugin_params("kvtc")
+    params["dev_bdf"] = "0000:81:00.0"
+    svc_h = svc_mgr.create_service("kvtc", params)
+    req = agent.initialize_xfer("WRITE", local, remote, name, service_h=svc_h)
+    ...
+    svc_mgr.destroy_service(svc_h)
+"""
+
+
+class nixl_service_manager:
+    """
+    @brief Python wrapper around nixlServiceManager.
+
+    Manages service plugin discovery, instantiation, and destruction.
+    """
+
+    def __init__(self):
+        self._mgr = nixlBind.nixlServiceManager()
+
+    """
+    @brief Return list of available service plugin names.
+    """
+
+    def get_avail_plugins(self) -> list[str]:
+        return self._mgr.getAvailPlugins()
+
+    """
+    @brief Return default initialization parameters for the given service plugin.
+    @param service_type Service type string (e.g. "kvtc").
+    @return dict of parameter name -> default value.
+    """
+
+    def get_plugin_params(self, service_type: str) -> dict[str, str]:
+        return self._mgr.getPluginParams(service_type)
+
+    """
+    @brief Instantiate a service engine and return an opaque handle.
+
+    The caller owns the returned handle and must call destroy_service() when done.
+    The handle must remain valid for the lifetime of all transfer requests that
+    reference it.
+
+    @param service_type Service type string (e.g. "kvtc").
+    @param params       Initialization parameters (from get_plugin_params, customized).
+    @return             nixlServiceH handle (opaque, pass to initialize_xfer).
+    """
+
+    def create_service(
+        self, service_type: str, params: dict[str, str]
+    ) -> nixlBind.nixlServiceH:
+        return self._mgr.createService(service_type, params)
+
+    """
+    @brief Destroy a service handle previously created by create_service().
+    @param handle Handle to destroy.
+    """
+
+    def destroy_service(self, handle: nixlBind.nixlServiceH):
+        self._mgr.destroyService(handle)
+
+
+"""
 @brief Configuration class for NIXL agent.
 
 @param enable_prog_thread Whether to enable the progress thread, if available.
@@ -561,6 +631,8 @@ class nixl_agent:
     @param notif_msg Optional notification message.
            notif_msg should be bytes, as that is what will be returned to the target, but will work with str too.
     @param backends Optional list of backend names to limit which backends NIXL can use.
+    @param service_h    Optional nixlServiceH handle created by nixl_service_manager.create_service().
+    @param service_meta Optional dict of key-value metadata passed to the service for this request.
     @return Opaque handle for posting/checking transfer.
             The handle can be released by calling release_xfer_handle from agent, or release() method on itself.
     """
@@ -573,6 +645,8 @@ class nixl_agent:
         remote_agent: str,
         notif_msg: bytes = b"",
         backends: list[str] = [],
+        service_h: Optional[nixlBind.nixlServiceH] = None,
+        service_meta: Optional[dict[str, str]] = None,
     ) -> nixl_xfer_handle:
         op = self.nixl_ops[operation]
         handle_list = []
@@ -580,7 +654,14 @@ class nixl_agent:
             handle_list.append(self.backends[backend_string])
 
         handle = self.agent.createXferReq(
-            op, local_descs, remote_descs, remote_agent, notif_msg, handle_list
+            op,
+            local_descs,
+            remote_descs,
+            remote_agent,
+            notif_msg,
+            handle_list,
+            service_h,
+            service_meta,
         )
 
         return nixl_xfer_handle(self.agent, handle)

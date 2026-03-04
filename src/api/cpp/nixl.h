@@ -24,6 +24,7 @@
 #include "nixl_types.h"
 #include "nixl_params.h"
 #include "nixl_descriptors.h"
+#include "nixl_service_manager.h"
 #include <chrono>
 #include <memory>
 
@@ -233,6 +234,11 @@ class nixlAgent {
          * @param  remote_agent   Remote (or self) agent name for accessing the remote (local) data
          * @param  req_hndl [out] Transfer request handle output
          * @param  extra_params   Optional extra parameters used in creating a transfer request
+         * @param  service_h      Optional service handle created by nixlServiceManager::createService().
+         *                        If provided, the service processes data in-place before the backend
+         *                        transfer begins. Must remain valid for the lifetime of the request.
+         *                        Agent does not take ownership.
+         * @param  service_meta   Optional key-value metadata passed to the service for this request
          * @return nixl_status_t  Error code if call was not successful
          */
         nixl_status_t
@@ -241,7 +247,9 @@ class nixlAgent {
                        const nixl_xfer_dlist_t &remote_descs,
                        const std::string &remote_agent,
                        nixlXferReqH* &req_hndl,
-                       const nixl_opt_args_t* extra_params = nullptr) const;
+                       const nixl_opt_args_t* extra_params = nullptr,
+                       nixlServiceH* service_h = nullptr,
+                       const nixl_s_params_t* service_meta = nullptr) const;
 
         /*** Operations on prepared Transfer Request ***/
 

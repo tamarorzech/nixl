@@ -29,7 +29,7 @@ if enable_plugins_opt != '' and disable_plugins_opt != ''
     error('Cannot specify both enable_plugins and disable_plugins options')
 endif
 
-all_plugins = ['UCX', 'LIBFABRIC', 'POSIX', 'OBJ', 'GDS', 'GDS_MT', 'MOONCAKE', 'HF3FS', 'GUSLI', 'GPUNETIO', 'UCCL']
+all_plugins = ['UCX', 'LIBFABRIC', 'POSIX', 'OBJ', 'GDS', 'GDS_MT', 'MOONCAKE', 'HF3FS', 'GUSLI', 'GPUNETIO', 'UCCL', 'KVTC']
 
 enabled_plugins = {}
 
@@ -323,13 +323,17 @@ endif
 
 # Define a specific plugin directory
 plugin_install_dir = join_paths(get_option('libdir'), 'plugins')
+service_plugin_install_dir = join_paths(get_option('libdir'), 'service_plugins')
 plugin_build_dir = meson.current_build_dir()
 
 # Add to global args so plugin managers can find it
 if get_option('buildtype') == 'debug'
     add_project_arguments('-DNIXL_USE_PLUGIN_FILE="' + plugin_build_dir + '/pluginlist"',  language: 'cpp')
+    add_project_arguments('-DNIXL_USE_SERVICE_PLUGIN_FILE="' + plugin_build_dir + '/service_pluginlist"',  language: 'cpp')
     plugfile = join_paths(plugin_build_dir, 'pluginlist')
     run_command('truncate', '-s 0', plugfile, check: true)
+    service_plugfile = join_paths(plugin_build_dir, 'service_pluginlist')
+    run_command('truncate', '-s 0', service_plugfile, check: true)
 endif
 
 nixl_inc_dirs = include_directories('src/api/cpp', 'src/api/cpp/backend', 'src/infra', 'src/core', 'src/core/telemetry')

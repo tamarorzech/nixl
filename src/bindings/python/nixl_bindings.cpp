@@ -24,6 +24,7 @@
 #include <iostream>
 
 #include "nixl.h"
+#include "nixl_service_manager.h"
 #include "serdes/serdes.h"
 
 namespace py = pybind11;
@@ -413,6 +414,72 @@ PYBIND11_MODULE(_bindings, m) {
                 return newObj;
             }));
 
+    // nixlServiceH: opaque handle for a service instance, created by nixlServiceManager.
+    // Exposed as a non-owning wrapper (lifetime managed by nixlServiceManager::destroyService).
+    py::class_<nixlServiceH, std::unique_ptr<nixlServiceH, py::nodelete>>(m, "nixlServiceH")
+        .def("getType",
+             &nixlServiceH::getType,
+             "Return the service type string (e.g. 'kvtc').")
+        .def("GetMaxBuffersize",
+             &nixlServiceH::GetMaxBuffersize,
+             py::arg("input_size"),
+             py::arg("op"),
+             "Return worst-case output buffer size for a given input size and operation.")
+        .def("getSupportedInputMems",
+             [](const nixlServiceH &h) {
+                 std::vector<std::string> result;
+                 for (const auto &m : h.getSupportedInputMems())
+                     result.push_back(nixlEnumStrings::memTypeStr(m));
+                 return result;
+             },
+             "Return list of supported input memory type strings.")
+        .def("getSupportedOutputMems",
+             [](const nixlServiceH &h) {
+                 std::vector<std::string> result;
+                 for (const auto &m : h.getSupportedOutputMems())
+                     result.push_back(nixlEnumStrings::memTypeStr(m));
+                 return result;
+             },
+             "Return list of supported output memory type strings.");
+
+    // nixlServiceManager: lifecycle manager for service plugin instances.
+    py::class_<nixlServiceManager>(m, "nixlServiceManager")
+        .def(py::init<>())
+        .def("getAvailPlugins",
+             [](nixlServiceManager &mgr) -> std::vector<nixl_service_t> {
+                 std::vector<nixl_service_t> plugins;
+                 throw_nixl_exception(mgr.getAvailPlugins(plugins));
+                 return plugins;
+             },
+             "Return list of available service plugin names.")
+        .def("getPluginParams",
+             [](nixlServiceManager &mgr,
+                const nixl_service_t &type) -> nixl_s_params_t {
+                 nixl_s_params_t params;
+                 throw_nixl_exception(mgr.getPluginParams(type, params));
+                 return params;
+             },
+             py::arg("type"),
+             "Return default initialization parameters for the given service plugin.")
+        .def("createService",
+             [](nixlServiceManager &mgr,
+                const nixl_service_t &type,
+                const nixl_s_params_t &params) -> nixlServiceH * {
+                 nixlServiceH *handle = nullptr;
+                 throw_nixl_exception(mgr.createService(type, params, handle));
+                 return handle;
+             },
+             py::arg("type"),
+             py::arg("params"),
+             py::return_value_policy::reference,
+             "Instantiate a service engine and return a handle. Caller must call destroyService().")
+        .def("destroyService",
+             [](nixlServiceManager &mgr, nixlServiceH *handle) {
+                 mgr.destroyService(handle);
+             },
+             py::arg("handle"),
+             "Destroy a service handle previously created by createService().");
+
     py::class_<nixlAgentConfig>(m, "nixlAgentConfig")
         // implicit constructor
         .def(py::init<bool>())
@@ -629,7 +696,9 @@ PYBIND11_MODULE(_bindings, m) {
                const nixl_xfer_dlist_t &remote_descs,
                const std::string &remote_agent,
                const std::string &notif_msg,
-               std::vector<uintptr_t> backends) -> uintptr_t {
+               std::vector<uintptr_t> backends,
+               py::object service_h,
+               py::object service_meta) -> uintptr_t {
                 nixlXferReqH *handle = nullptr;
                 nixl_opt_args_t extra_params;
 
@@ -640,8 +709,30 @@ PYBIND11_MODULE(_bindings, m) {
                     extra_params.notifMsg = notif_msg;
                     extra_params.hasNotif = true;
                 }
-                nixl_status_t ret = agent.createXferReq(
-                    operation, local_descs, remote_descs, remote_agent, handle, &extra_params);
+
+                nixlServiceH *svc_ptr = nullptr;
+                if (!service_h.is_none()) {
+                    svc_ptr = service_h.cast<nixlServiceH *>();
+                }
+
+                nixl_s_params_t meta_params;
+                const nixl_s_params_t *meta_ptr = nullptr;
+                if (!service_meta.is_none()) {
+                    for (const auto &item : service_meta.cast<py::dict>()) {
+                        meta_params[item.first.cast<std::string>()] =
+                            item.second.cast<std::string>();
+                    }
+                    meta_ptr = &meta_params;
+                }
+
+                nixl_status_t ret = agent.createXferReq(operation,
+                                                        local_descs,
+                                                        remote_descs,
+                                                        remote_agent,
+                                                        handle,
+                                                        &extra_params,
+                                                        svc_ptr,
+                                                        meta_ptr);
 
                 throw_nixl_exception(ret);
                 return (uintptr_t)handle;
@@ -652,6 +743,8 @@ PYBIND11_MODULE(_bindings, m) {
             py::arg("remote_agent"),
             py::arg("notif_msg") = std::string(""),
             py::arg("backend") = std::vector<uintptr_t>({}),
+            py::arg("service_h") = py::none(),
+            py::arg("service_meta") = py::none(),
             py::call_guard<py::gil_scoped_release>())
         .def(
             "estimateXferCost",
