@@ -30,6 +30,7 @@
 constexpr uint32_t NUM_TASKS = 4;
 constexpr auto TIMEOUT = std::chrono::milliseconds(5000);
 constexpr auto POLL_INTERVAL = std::chrono::milliseconds(10);
+constexpr uint32_t KVTC_MAX_BUFFER_DIVISOR = 16;
 
 nixlKvtcServiceEngine::nixlKvtcServiceEngine(const nixlServiceInitParams* init_params)
     : nixlServiceEngine(init_params), client_(nullptr) {
@@ -101,7 +102,7 @@ size_t nixlKvtcServiceEngine::GetMaxBuffersize(size_t input_size, nixl_xfer_op_t
     // WRITE path (compress): CAT_X2 halves the data, but allocate the full input size
     // as the worst case (incompressible data).
     // READ path (decompress): output can be up to 2x the compressed input size.
-    return input_size; // worst-case: full expansion
+    return input_size / KVTC_MAX_BUFFER_DIVISOR; // worst-case: full expansion
 }
 
 nixl_status_t nixlKvtcServiceEngine::processDataAsync(const nixl_xfer_op_t &operation,

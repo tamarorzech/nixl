@@ -91,6 +91,7 @@ struct BufferResources {
     size_t      buffer_size;
     int         dst_fd;
     std::string dst_file_path;
+    size_t      output_buffer_size;
 };
 
 BufferResources allocateBuffers() {
@@ -109,16 +110,16 @@ BufferResources allocateBuffers() {
     return resources;
 }
 
-int setupFile(const std::string& file_path, size_t buffer_size) {
+int setupFile(const std::string& file_path, size_t output_buffer_size) {
     int fd = open(file_path.c_str(), O_CREAT | O_RDWR | O_TRUNC, 0644);
     if (fd < 0) {
         std::cerr << "Failed to open destination file: " << file_path << "\n";
         return -1;
     }
 
-    std::vector<uint8_t> zeros(buffer_size, 0x00);
-    ssize_t written = write(fd, zeros.data(), buffer_size);
-    if (written != (ssize_t)buffer_size) {
+    std::vector<uint8_t> zeros(output_buffer_size, 0x00);
+    ssize_t written = write(fd, zeros.data(), output_buffer_size);
+    if (written != (ssize_t)output_buffer_size) {
         std::cerr << "Failed to pre-allocate file\n";
         close(fd);
         return -1;
@@ -184,7 +185,7 @@ void registerMemory(nixlAgent& agent,
     nixl_reg_dlist_t reg_list_dst(FILE_SEG);
     nixlBlobDesc dst_desc;
     dst_desc.addr     = 0;
-    dst_desc.len      = resources.buffer_size;
+    dst_desc.len      = resources.output_buffer_size;
     dst_desc.devId    = resources.dst_fd;
     dst_desc.metaInfo = resources.dst_file_path;
     reg_list_dst.addDesc(dst_desc);
@@ -239,26 +240,25 @@ void performWriteOperation(nixlAgent& agent,
     std::cout << "Testing WRITE operation (DRAM -> FILE)\n";
     std::cout << "========================================\n\n";
 
-    size_t xfer_size = resources.buffer_size;
-
     nixl_xfer_dlist_t src_xfer_descs(DRAM_SEG);
     nixlBasicDesc src_xfer;
     src_xfer.addr  = (uintptr_t)resources.src_buffer;
-    src_xfer.len   = xfer_size;
+    src_xfer.len   = resources.buffer_size;
     src_xfer.devId = 0;
     src_xfer_descs.addDesc(src_xfer);
 
     nixl_xfer_dlist_t dst_xfer_descs(FILE_SEG);
     nixlBasicDesc dst_xfer;
     dst_xfer.addr  = 0;
-    dst_xfer.len   = xfer_size;
+    dst_xfer.len   = resources.output_buffer_size;
     dst_xfer.devId = resources.dst_fd;
     dst_xfer_descs.addDesc(dst_xfer);
 
     std::cout << "Creating transfer request...\n";
     std::cout << "  Source: " << resources.src_buffer << "\n";
     std::cout << "  Destination: " << (void*)dst_xfer.addr << "\n";
-    std::cout << "  Size: " << xfer_size << " bytes\n\n";
+    std::cout << "  Original Size: " << resources.buffer_size << " bytes\n";
+    std::cout << "  Compressed Size: " << resources.output_buffer_size << " bytes\n\n";
 
     nixlXferReqH *req_handle;
     ret = agent.createXferReq(NIXL_WRITE, src_xfer_descs, dst_xfer_descs,
@@ -387,9 +387,19 @@ int main(int argc, char **argv) {
     initializeAgentAndBackend(args.backend, agent, extra_params);
     std::cout << "Backend created successfully\n\n";
 
+    // Create service — plugin transforms src_buffer in-place before each transfer
+    nixlServiceManager svc_mgr;
+    nixlServiceH* svc_h = createService(svc_mgr);
+
     BufferResources resources = allocateBuffers();
+    size_t max_sz = resources.buffer_size;
+    if (svc_h) {
+        max_sz = svc_h->GetMaxBuffersize(resources.buffer_size, NIXL_WRITE);
+        std::cout << "Max output buffer size for WRITE: " << max_sz << " bytes\n\n";
+    }    
     resources.dst_file_path   = "/tmp/nixl_dst_test_file.bin";
-    resources.dst_fd          = setupFile(resources.dst_file_path, resources.buffer_size);
+    resources.dst_fd          = setupFile(resources.dst_file_path, max_sz);
+    resources.output_buffer_size = max_sz;
     if (resources.dst_fd < 0) {
         free(resources.src_buffer);
         return 1;
@@ -399,18 +409,9 @@ int main(int argc, char **argv) {
     std::cout << "  Source (DRAM):      " << resources.src_buffer
               << " (size: " << resources.buffer_size << " bytes, pattern: 0xAA)\n";
     std::cout << "  Destination (FILE): " << resources.dst_file_path
-              << " (fd: " << resources.dst_fd << ", size: " << resources.buffer_size << " bytes)\n\n";
+              << " (fd: " << resources.dst_fd << ", size: " << resources.output_buffer_size << " bytes)\n\n";
 
     registerMemory(agent, resources, extra_params);
-
-    // Create service — plugin transforms src_buffer in-place before each transfer
-    nixlServiceManager svc_mgr;
-    nixlServiceH* svc_h = createService(svc_mgr);
-
-    if (svc_h) {
-        size_t max_sz = svc_h->GetMaxBuffersize(resources.buffer_size, NIXL_WRITE);
-        std::cout << "Max output buffer size for WRITE: " << max_sz << " bytes\n\n";
-    }
 
     // WRITE: service processes src_buffer in-place, then backend writes to file
     performWriteOperation(agent, resources, extra_params, svc_h);
@@ -434,7 +435,7 @@ int main(int argc, char **argv) {
     nixl_reg_dlist_t dereg_dst(FILE_SEG);
     nixlBlobDesc dst_dereg;
     dst_dereg.addr     = 0;
-    dst_dereg.len      = resources.buffer_size;
+    dst_dereg.len      = resources.output_buffer_size;
     dst_dereg.devId    = resources.dst_fd;
     dst_dereg.metaInfo = resources.dst_file_path;
     dereg_dst.addDesc(dst_dereg);

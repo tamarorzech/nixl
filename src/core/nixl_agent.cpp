@@ -879,10 +879,10 @@ nixlAgent::createXferReq(const nixl_xfer_op_t &operation,
         return NIXL_ERR_INVALID_PARAM;
     }
     for (int i = 0; i < local_descs.descCount(); ++i) {
-        if (local_descs[i].len != remote_descs[i].len) {
-            NIXL_ERROR_FUNC << "length mismatch at index " << i;
-            return NIXL_ERR_INVALID_PARAM;
-        }
+        // if (local_descs[i].len != remote_descs[i].len) {
+        //     NIXL_ERROR_FUNC << "length mismatch at index " << i;
+        //     return NIXL_ERR_INVALID_PARAM;
+        // }
         total_bytes += local_descs[i].len;
     }
 
@@ -1137,6 +1137,11 @@ nixlAgent::postXferReq(nixlXferReqH *req_hndl,
         // svc_status == NIXL_SUCCESS: service completed immediately, fall through to backend
         req_hndl->service_phase_pending = false;
         NIXL_INFO << "Service completed immediately";
+
+        for (int i = 0; i < req_hndl->initiatorDescs->descCount(); i++) {
+            auto &desc = (*req_hndl->initiatorDescs)[i];
+            desc.len = req_hndl->service_h->GetMaxBuffersize(desc.len, req_hndl->backendOp);
+        }
     }
 
     // If status is not NIXL_IN_PROG we can repost,
