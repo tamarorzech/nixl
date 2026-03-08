@@ -78,6 +78,13 @@ public:
                                 CompType comp_type);
     ClientState
     GetState() const noexcept;
+
+    // Returns true if any submitted tasks have not yet reached a terminal state
+    // (SUCCESS or FAILED).  Use this instead of relying on poll() returning false,
+    // because poll() returns false whenever doca_pe_progress finds no *immediate*
+    // work — which can happen before the DPU has even responded.
+    bool
+    HasPendingTasks() const noexcept;
     // void stop();
 
 protected:

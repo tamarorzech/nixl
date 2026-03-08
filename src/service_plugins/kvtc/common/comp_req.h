@@ -46,7 +46,6 @@ to_string(ReqState state) {
 enum class CompType {
     COMP_TYPE_KVTC_X16,
     COMP_TYPE_KVTC_X32,
-    COMP_TYPE_CAT_X2,
 };
 
 inline const std::string
@@ -56,8 +55,6 @@ to_string(CompType comp_type) noexcept {
         return "COMP_TYPE_KVTC_X16";
     case CompType::COMP_TYPE_KVTC_X32:
         return "COMP_TYPE_KVTC_X32";
-    case CompType::COMP_TYPE_CAT_X2:
-        return "COMP_TYPE_CAT_X2";
     default:
         return "UNRECOGNIZED_COMP_TYPE: " + std::to_string(static_cast<int>(comp_type));
     }
@@ -68,7 +65,6 @@ IsValidCompType(CompType comp_type) noexcept {
     switch (comp_type) {
     case CompType::COMP_TYPE_KVTC_X16:
     case CompType::COMP_TYPE_KVTC_X32:
-    case CompType::COMP_TYPE_CAT_X2:
         return true;
     default:
         return false;

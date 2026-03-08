@@ -248,6 +248,18 @@ HostClient::GetState() const noexcept {
     return client_state_;
 }
 
+bool
+HostClient::HasPendingTasks() const noexcept {
+    for (const auto &[id, handle] : comp_req_handles_) {
+        if (handle.state != ReqState::REQ_STATE_SUCCESS &&
+            handle.state != ReqState::REQ_STATE_FAILED &&
+            handle.state != ReqState::REQ_STATE_SEND_FAILED) {
+            return true;
+        }
+    }
+    return false;
+}
+
 void
 HostClient::InitializeDocaComchClient() {
     struct doca_comch_client *comch_client_ptr_raw;
@@ -457,10 +469,13 @@ HostClient::consumer_post_recv_completion_cb(struct doca_comch_consumer_task_pos
         // Copy compressed data to client's destination buffer
         std::memcpy(const_cast<void *>(resp_handle->dest_buf), compressed_data, compressed_len);
 
-        // Update the client's handle state
+        // Mark the task as successfully completed now that the DPU has sent
+        // back the compressed data.  We use REQ_STATE_SUCCESS explicitly here
+        // rather than copying resp_handle->state (which reflects the DPU-side
+        // state at send time, not the final host-side outcome).
         auto handle_it = instance_->comp_req_handles_.find(resp_handle->task_id);
         if (handle_it != instance_->comp_req_handles_.end())
-            handle_it->second.state = resp_handle->state;
+            handle_it->second.state = ReqState::REQ_STATE_SUCCESS;
 
         // Resubmit the post_recv task to continue receiving
         doca_comch_consumer_task_post_recv_set_buf(task, recv_buf);

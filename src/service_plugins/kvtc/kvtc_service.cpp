@@ -124,30 +124,30 @@ nixl_status_t nixlKvtcServiceEngine::processDataAsync(const nixl_xfer_op_t &oper
                     reinterpret_cast<void*>(data_descs[i].addr),
                     data_descs[i].len,
                     dest_buf,
-                    CompType::COMP_TYPE_CAT_X2);
+                    CompType::COMP_TYPE_KVTC_X16);
             } catch (const std::exception &e) {
                 NIXL_ERROR << "KVTC: task submission failed: " << e.what();
                 return NIXL_ERR_BACKEND;
             }
         }
     } else {
-        // READ path: decompression — submit tasks similarly.
-        for (size_t i = 0; i < data_descs.size(); i++) {
-            void* dest_buf = reinterpret_cast<void*>(data_descs[i].addr);
+        // // READ path: decompression — submit tasks similarly.
+        // for (size_t i = 0; i < data_descs.size(); i++) {
+        //     void* dest_buf = reinterpret_cast<void*>(data_descs[i].addr);
 
-            NIXL_DEBUG << "KVTC: submitting decompress task, src=" << data_descs[i].addr
-                       << " size=" << data_descs[i].len;
-            try {
-                client_->CreateAndSubmitCompSendTask(
-                    reinterpret_cast<void*>(data_descs[i].addr),
-                    data_descs[i].len,
-                    dest_buf,
-                    CompType::COMP_TYPE_CAT_X2);
-            } catch (const std::exception &e) {
-                NIXL_ERROR << "KVTC: task submission failed: " << e.what();
-                return NIXL_ERR_BACKEND;
-            }
-        }
+        //     NIXL_DEBUG << "KVTC: submitting decompress task, src=" << data_descs[i].addr
+        //                << " size=" << data_descs[i].len;
+        //     try {
+        //         client_->CreateAndSubmitCompSendTask(
+        //             reinterpret_cast<void*>(data_descs[i].addr),
+        //             data_descs[i].len,
+        //             dest_buf,
+        //             CompType::COMP_TYPE_CAT_X2);
+        //     } catch (const std::exception &e) {
+        //         NIXL_ERROR << "KVTC: task submission failed: " << e.what();
+        //         return NIXL_ERR_BACKEND;
+        //     }
+        // }
     }
 
     // Tasks submitted asynchronously; caller must poll via pollProcessData().
@@ -160,10 +160,7 @@ nixl_status_t nixlKvtcServiceEngine::pollProcessData() {
         return NIXL_ERR_BACKEND;
     }
 
-    // client_->poll() returns true if there are still pending completions,
-    // false when all submitted tasks have completed.
-    bool pending = client_->poll();
-    if (pending) {
+    if (client_->poll() || client_->HasPendingTasks()) {
         return NIXL_IN_PROG;
     }
 
