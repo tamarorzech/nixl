@@ -179,7 +179,8 @@ void
 HostClient::CreateAndSubmitCompSendTask(void *source_buf,
                                         std::size_t source_size,
                                         void *dest_buf,
-                                        CompType comp_type) {
+                                        CompType comp_type,
+                                        uint64_t batch_id) {
 
     if (client_state_ != ClientState::CLIENT_STATE_RUNNING)
         throw ComchError(ComchErrorCode::COMCH_INVALID_STATE,
@@ -193,6 +194,8 @@ HostClient::CreateAndSubmitCompSendTask(void *source_buf,
             "source_buf, source_size, dest_buf, and comp_type cannot be empty or null");
 
     task_id_t comp_task_id = GetAndIncrementTaskId();
+    // Associate this task with its batch so per-request completion can be checked.
+    batch_to_tasks_[batch_id].push_back(comp_task_id);
 
     auto [it, inserted] = comp_req_handles_.emplace(
         comp_task_id, CompReqHandle(source_buf, source_size, comp_task_id, comp_type, dest_buf));
@@ -246,18 +249,6 @@ HostClient::CreateAndSubmitCompSendTask(void *source_buf,
 HostClient::ClientState
 HostClient::GetState() const noexcept {
     return client_state_;
-}
-
-bool
-HostClient::HasPendingTasks() const noexcept {
-    for (const auto &[id, handle] : comp_req_handles_) {
-        if (handle.state != ReqState::REQ_STATE_SUCCESS &&
-            handle.state != ReqState::REQ_STATE_FAILED &&
-            handle.state != ReqState::REQ_STATE_SEND_FAILED) {
-            return true;
-        }
-    }
-    return false;
 }
 
 void
@@ -372,6 +363,33 @@ HostClient::HandleHandshakeControlMessage(const HandshakeData *handshake_data) {
 task_id_t
 HostClient::GetAndIncrementTaskId() noexcept {
     return task_id_.fetch_add(1);
+}
+
+uint64_t
+HostClient::AllocBatchId() noexcept {
+    return batch_id_ctr_.fetch_add(1, std::memory_order_relaxed);
+}
+
+bool
+HostClient::HasPendingTasksForBatch(uint64_t batch_id) noexcept {
+    auto batch_it = batch_to_tasks_.find(batch_id);
+    if (batch_it == batch_to_tasks_.end())
+        return false; // already cleaned up or never registered
+
+    for (task_id_t tid : batch_it->second) {
+        auto handle_it = comp_req_handles_.find(tid);
+        if (handle_it == comp_req_handles_.end())
+            continue; // task already removed — treat as done
+        const ReqState state = handle_it->second.state;
+        if (state != ReqState::REQ_STATE_SUCCESS &&
+            state != ReqState::REQ_STATE_FAILED &&
+            state != ReqState::REQ_STATE_SEND_FAILED) {
+            return true; // at least one task still in flight
+        }
+    }
+    // All tasks in this batch reached a terminal state — clean up the record.
+    batch_to_tasks_.erase(batch_it);
+    return false;
 }
 
 void

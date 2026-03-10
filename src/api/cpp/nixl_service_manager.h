@@ -18,8 +18,8 @@
 #ifndef _NIXL_SERVICE_MANAGER_H
 #define _NIXL_SERVICE_MANAGER_H
 
-#include <vector>
 #include <string>
+#include <vector>
 
 #include "nixl_types.h"
 #include "nixl_descriptors.h"
@@ -33,8 +33,14 @@
  * must remain valid for the lifetime of all transfer requests that reference it.
  * The nixlAgent does NOT take ownership of this handle.
  *
- * South-bound methods (processDataAsync / pollProcessData) are called by the
- * nixlAgent internally and are not part of the application-facing API.
+ * When a transfer request with a service attached is posted, nixl spawns one
+ * dedicated std::thread per request. That thread calls processData() — which
+ * blocks until the service work is complete — and then immediately initiates
+ * the backend transfer in the same thread. The engine itself has no knowledge
+ * of threads or callbacks.
+ *
+ * The processData() method is called internally by nixlAgent and are not part
+ * of the application-facing API.
  */
 class nixlServiceH {
 public:
@@ -56,15 +62,14 @@ public:
 
     // -- Internal API called by nixlAgent -- //
 
-    /** @brief Initiate async processing. Returns NIXL_IN_PROG or NIXL_SUCCESS. */
-    nixl_status_t processDataAsync(const nixl_xfer_op_t &op,
-                                   const std::vector<nixlBlobDesc> &data_descs) {
-        return engine_->processDataAsync(op, data_descs);
-    }
-
-    /** @brief Poll in-flight processing. Returns NIXL_IN_PROG or NIXL_SUCCESS. */
-    nixl_status_t pollProcessData() {
-        return engine_->pollProcessData();
+    /** @brief Perform the data transformation synchronously.
+     *
+     *         Blocks until the engine has fully completed the operation.
+     *         Called from a dedicated per-request thread spawned by nixlAgent;
+     *         the caller runs the backend postXfer immediately after this returns. */
+    nixl_status_t processData(const nixl_xfer_op_t &op,
+                               const std::vector<nixlBlobDesc> &data_descs) {
+        return engine_->processData(op, data_descs);
     }
 
     /** @brief Return supported input memory types (used for validation). */
@@ -82,7 +87,7 @@ private:
 
     // Only nixlServiceManager creates and destroys handles.
     explicit nixlServiceH(nixlServiceEngine *engine) : engine_(engine) {}
-    ~nixlServiceH() {}
+    ~nixlServiceH() = default;
 
     friend class nixlServiceManager;
 };

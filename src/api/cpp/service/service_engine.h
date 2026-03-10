@@ -17,8 +17,6 @@
 #ifndef __SERVICE_ENGINE_H
 #define __SERVICE_ENGINE_H
 
-#include <memory>
-#include <mutex>
 #include <string>
 #include <vector>
 #include "nixl_types.h"
@@ -30,7 +28,14 @@ struct nixlServiceInitParams {
     const nixl_s_params_t* customParams; // Custom parameters
 };
 
-// Base service engine class for different service implementations
+// Base service engine class for different service implementations.
+//
+// Threading contract: the engine is purely synchronous and has no knowledge
+// of callbacks or threads. nixl wraps each transfer request in a dedicated
+// std::thread that calls processData() and, after it returns, initiates the
+// backend transfer. Plugins must be thread-safe only in the sense that
+// concurrent requests call processData() concurrently (serialising internally
+// where needed, e.g. via a mutex around a single-threaded hardware context).
 class nixlServiceEngine {
 private:
     nixl_service_t serviceType_;
@@ -85,15 +90,15 @@ public:
     // op: NIXL_WRITE (encode path) or NIXL_READ (decode path)
     virtual size_t GetMaxBuffersize(size_t input_size, nixl_xfer_op_t op) const = 0;
 
-    // Initiate an asynchronous data transformation.
-    // Returns NIXL_IN_PROG if the operation was submitted and is in flight,
-    // or NIXL_SUCCESS if it completed immediately.
-    virtual nixl_status_t processDataAsync(const nixl_xfer_op_t &operation,
-                                           const std::vector<nixlBlobDesc> &data_descs) = 0;
-
-    // Poll the status of the in-flight async operation.
-    // Returns NIXL_IN_PROG while busy, NIXL_SUCCESS when complete.
-    virtual nixl_status_t pollProcessData() = 0;
+    // Perform the data transformation synchronously.
+    // Blocks until the operation is fully complete and returns NIXL_SUCCESS,
+    // or a negative error code on failure.
+    //
+    // Called from a dedicated per-request thread spawned by nixl. The engine
+    // must serialize any internal hardware context accesses itself (e.g. via
+    // a mutex) when multiple requests are processed concurrently.
+    virtual nixl_status_t processData(const nixl_xfer_op_t &operation,
+                                      const std::vector<nixlBlobDesc> &data_descs) = 0;
 
 };
 

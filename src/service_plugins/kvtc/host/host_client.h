@@ -5,6 +5,7 @@
 #include <chrono>
 #include <map>
 #include <string>
+#include <vector>
 
 #include "doca_dev_utils.h"
 #include "comp_req.h"
@@ -71,20 +72,27 @@ public:
     start();
     bool
     poll(); // Progress the DOCA PE to process events. Returns true if work was done, false otherwise.
+    // Submit a compression/decompression send task for source_buf.
+    // batch_id associates this task with a specific request so that
+    // HasPendingTasksForBatch() can be used for per-request completion checks.
     void
     CreateAndSubmitCompSendTask(void *source_buf,
                                 std::size_t source_size,
                                 void *dest_buf,
-                                CompType comp_type);
+                                CompType comp_type,
+                                uint64_t batch_id);
+
+    // Allocate a unique batch ID for a new request.
+    uint64_t
+    AllocBatchId() noexcept;
+
     ClientState
     GetState() const noexcept;
 
-    // Returns true if any submitted tasks have not yet reached a terminal state
-    // (SUCCESS or FAILED).  Use this instead of relying on poll() returning false,
-    // because poll() returns false whenever doca_pe_progress finds no *immediate*
-    // work — which can happen before the DPU has even responded.
+    // Returns true if any task belonging to batch_id has not yet completed.
+    // When all tasks in the batch are done, the batch record is erased.
     bool
-    HasPendingTasks() const noexcept;
+    HasPendingTasksForBatch(uint64_t batch_id) noexcept;
     // void stop();
 
 protected:
@@ -106,7 +114,9 @@ protected:
     std::atomic<bool> client_running_;
     std::atomic<bool> client_failed_;
     std::atomic<task_id_t> task_id_;
+    std::atomic<uint64_t>  batch_id_ctr_{1}; // 0 is reserved (invalid batch id)
     std::map<task_id_t, CompReqHandle> comp_req_handles_;
+    std::map<uint64_t, std::vector<task_id_t>> batch_to_tasks_; // batch_id → task IDs
     std::atomic<ClientState> client_state_;
     std::map<task_id_t, std::unique_ptr<TaskResources>> task_resources_;
 

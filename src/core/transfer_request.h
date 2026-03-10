@@ -17,13 +17,18 @@
 #ifndef __TRANSFER_REQUEST_H_
 #define __TRANSFER_REQUEST_H_
 
+#include <atomic>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <memory>
 
 #include "nixl_types.h"
 #include "backend_engine.h"
 #include "telemetry.h"
+
+// Forward declaration — full definition in nixl_service_manager.h
+class nixlServiceH;
 
 enum nixl_telemetry_stat_status_t {
     NIXL_TELEMETRY_POST = 0,
@@ -40,11 +45,13 @@ class nixlXferReqH {
 
         nixl_meta_dlist_t* initiatorDescs = nullptr;
         nixl_meta_dlist_t* targetDescs    = nullptr;
-        
-        nixlServiceH*      service_h      = nullptr;     // service handle (not owned by agent)
-        const nixl_s_params_t*   service_meta   = nullptr;     // service metadata
-        bool               service_phase_pending = false; // true while service is in-flight
-        nixl_meta_dlist_t* processedInitiatorDescs = nullptr;
+
+        nixlServiceH*      service_h            = nullptr;
+        const nixl_s_params_t* service_meta     = nullptr;
+        bool               service_phase_pending = false;
+        std::thread        svc_thread_;
+        std::atomic<bool>  svc_thread_done_{false};
+        nixl_status_t      svc_post_result_ = NIXL_ERR_NOT_POSTED;
 
         std::string        remoteAgent;
         nixl_blob_t        notifMsg;
@@ -59,6 +66,8 @@ class nixlXferReqH {
         inline nixlXferReqH() { }
 
         inline ~nixlXferReqH() {
+            if (svc_thread_.joinable())
+                svc_thread_.join();
             // delete checks for nullptr itself
             delete initiatorDescs;
             delete targetDescs;
