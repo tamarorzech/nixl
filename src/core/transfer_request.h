@@ -19,11 +19,12 @@
 
 #include <atomic>
 #include <string>
-#include <thread>
 #include <unordered_map>
+#include <vector>
 #include <memory>
 
 #include "nixl_types.h"
+#include "nixl_descriptors.h"
 #include "backend_engine.h"
 #include "telemetry.h"
 
@@ -49,7 +50,20 @@ class nixlXferReqH {
         nixlServiceH*      service_h            = nullptr;
         const nixl_s_params_t* service_meta     = nullptr;
         bool               service_phase_pending = false;
-        std::thread        svc_thread_;
+
+        // Service request handle and output descriptors — set by postXferReq via
+        // processDataAsync(). For the external-polling path (service_enable_pt == false),
+        // these are used by getXferStatus() to drive poll() on each user call.
+        // For the agent-PT path (service_enable_pt == true), the agent's progress
+        // thread manages the handoff autonomously using these fields.
+        uint64_t               svc_req_{0};
+        std::vector<nixlBlobDesc> out_descs_;
+
+        // Completion signal for the progress-thread path only.
+        // The on_complete callback (fired by the service progress thread) writes
+        // svc_post_result_ then sets svc_thread_done_ with a release store.
+        // getXferStatus() reads svc_thread_done_ with an acquire load to establish
+        // the happens-before guarantee that makes svc_post_result_ safely readable.
         std::atomic<bool>  svc_thread_done_{false};
         nixl_status_t      svc_post_result_ = NIXL_ERR_NOT_POSTED;
 
@@ -66,8 +80,6 @@ class nixlXferReqH {
         inline nixlXferReqH() { }
 
         inline ~nixlXferReqH() {
-            if (svc_thread_.joinable())
-                svc_thread_.join();
             // delete checks for nullptr itself
             delete initiatorDescs;
             delete targetDescs;
@@ -80,6 +92,7 @@ class nixlXferReqH {
                            nixl_telemetry_stat_status_t stat_status);
 
         friend class nixlAgent;
+        friend class nixlAgentData;
 };
 
 class nixlDlistH {

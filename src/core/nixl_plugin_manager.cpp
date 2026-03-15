@@ -777,8 +777,13 @@ nixlServicePluginHandle::getServiceOptions() const {
 }
 
 nixl_mem_list_t
-nixlServicePluginHandle::getServiceMems() const {
-    return plugin_->get_service_mems();
+nixlServicePluginHandle::getInputMems() const {
+    return plugin_->get_input_mems();
+}
+
+nixl_mem_list_t
+nixlServicePluginHandle::getOutputMems() const {
+    return plugin_->get_output_mems();
 }
 
 std::shared_ptr<const nixlServicePluginHandle>

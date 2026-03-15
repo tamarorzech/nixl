@@ -139,7 +139,28 @@ using nixl_b_params_t = std::unordered_map<std::string, std::string>;
  * @brief A typedef for a  std::unordered_map<std::string, std::string>
  *        to hold nixl_s_params_t .
  */
- using nixl_s_params_t = std::unordered_map<std::string, std::string>;
+using nixl_s_params_t = std::unordered_map<std::string, std::string>;
+
+/**
+ * @brief Per-request service metadata map passed to the service engine.
+ *        Alias for nixl_s_params_t for clarity in the transfer API.
+ */
+using nixl_service_md_t = nixl_s_params_t;
+
+/**
+ * @brief Supported memory types for a service plugin, split by direction.
+ *
+ * input  - memory types the service can read from (source buffers).
+ * output - memory types the service can write to (destination buffers).
+ *
+ * Obtained via nixlAgent::getServicePluginParams() and passed back to
+ * nixlAgent::addService() to express which memory types the caller intends
+ * to use with the service instance.
+ */
+struct nixl_service_mems_t {
+    nixl_mem_list_t input;
+    nixl_mem_list_t output;
+};
 
 /**
  * @brief A typedef for a  std::unordered_map<std::string, std::vector<nixl_blob_t>>
@@ -195,11 +216,18 @@ struct nixlAgentOptionalArgs {
 
     /**
      * @var serviceH Service handle to apply before a transfer. Used in createXferReq / makeXferReq.
-     *      Services are created via nixlServiceManager::createService() before the transfer.
-     *      The handle must remain valid for the lifetime of all requests that reference it.
-     *      The agent does NOT take ownership of the handle.
+     *      Services are created via nixlAgent::addService() before the transfer.
+     *      The agent owns the service lifetime; this pointer must remain valid only for the
+     *      lifetime of requests that reference it.
      */
-    nixlServiceH* serviceH;
+    nixlServiceH* serviceH = nullptr;
+
+    /**
+     * @var serviceMd Optional per-request metadata forwarded to the service engine.
+     *      Used in createXferReq / makeXferReq alongside serviceH.
+     *      Not owned by the agent; must remain valid for the duration of the call.
+     */
+    nixl_service_md_t* serviceMd = nullptr;
 
     /**
      * @var notifMsg A message to be used in createXferReq / makeXferReq / postXferReq,

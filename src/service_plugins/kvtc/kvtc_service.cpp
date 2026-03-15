@@ -99,73 +99,75 @@ size_t nixlKvtcServiceEngine::GetMaxBuffersize(size_t input_size, nixl_xfer_op_t
     return input_size / KVTC_MAX_BUFFER_DIVISOR;
 }
 
-nixl_status_t nixlKvtcServiceEngine::processData(const nixl_xfer_op_t &operation,
-                                                   const std::vector<nixlBlobDesc> &data_descs) {
+nixl_status_t nixlKvtcServiceEngine::processDataAsync(const nixl_xfer_op_t &operation,
+                                                    const std::vector<nixlBlobDesc> &src_descs,
+                                                    std::vector<nixlBlobDesc> &out_descs,
+                                                    const nixl_s_params_t *service_meta,
+                                                    uint64_t &svc_req_out) {
+    (void)service_meta;
     if (client_ == nullptr) {
-        NIXL_ERROR << "KVTC: HostClient not initialized";
+        NIXL_ERROR << "KVTC processDataAsync: HostClient not initialized";
         return NIXL_ERR_BACKEND;
     }
 
-    // Allocate a batch ID that uniquely identifies this call's tasks.
-    // HasPendingTasksForBatch() scopes completion checks to only the tasks
-    // submitted here, so concurrent calls from different threads are independent.
+    // Allocate a batch_id that uniquely scopes this request's DOCA tasks.
+    // HasPendingTasksForBatch() in poll() uses this to scope completion checks.
     const uint64_t batch_id = client_->AllocBatchId();
 
     if (operation == NIXL_WRITE) {
-        // Submit all compression tasks under the mutex.
+        // Submit all compression tasks under the mutex (non-blocking DOCA submit).
         std::lock_guard<std::mutex> lk(client_mutex_);
-        for (size_t i = 0; i < data_descs.size(); i++) {
-            void* dest_buf = reinterpret_cast<void*>(data_descs[i].addr);
-
-            NIXL_DEBUG << "KVTC: submitting compress task (batch=" << batch_id
-                       << ") src=" << data_descs[i].addr << " size=" << data_descs[i].len;
+        for (const auto &desc : src_descs) {
+            void* dest_buf = reinterpret_cast<void*>(desc.addr);
+            NIXL_DEBUG << "KVTC processDataAsync: compress task (batch=" << batch_id
+                       << ") src=" << desc.addr << " size=" << desc.len;
             try {
                 client_->CreateAndSubmitCompSendTask(
-                    reinterpret_cast<void*>(data_descs[i].addr),
-                    data_descs[i].len,
+                    reinterpret_cast<void*>(desc.addr),
+                    desc.len,
                     dest_buf,
                     CompType::COMP_TYPE_KVTC_X16,
                     batch_id);
             } catch (const std::exception &e) {
-                NIXL_ERROR << "KVTC: task submission failed: " << e.what();
+                NIXL_ERROR << "KVTC processDataAsync: task submission failed: " << e.what();
                 return NIXL_ERR_BACKEND;
             }
         }
-    } else {
-        // READ path: decompression — submit tasks similarly.
-        // std::lock_guard<std::mutex> lk(client_mutex_);
-        // for (size_t i = 0; i < data_descs.size(); i++) {
-        //     void* dest_buf = reinterpret_cast<void*>(data_descs[i].addr);
-        //     try {
-        //         client_->CreateAndSubmitCompSendTask(
-        //             reinterpret_cast<void*>(data_descs[i].addr),
-        //             data_descs[i].len,
-        //             dest_buf,
-        //             CompType::COMP_TYPE_CAT_X2,
-        //             batch_id);
-        //     } catch (const std::exception &e) {
-        //         NIXL_ERROR << "KVTC: task submission failed: " << e.what();
-        //         return NIXL_ERR_BACKEND;
-        //     }
-        // }
     }
+    // READ path (decompress) would be submitted similarly here.
 
-    // Poll until all tasks in this batch are complete. The mutex is taken and
-    // released each iteration so concurrent per-request threads can interleave:
-    // while thread A drives doca_pe_progress(), thread B waits for the lock.
-    // If B's tasks complete during A's poll() call, B will find them done on its
-    // first iteration and return without additional hardware round-trips.
-    while (true) {
-        {
-            std::lock_guard<std::mutex> lk(client_mutex_);
-            // Drive DOCA PE: triggers completion callbacks that update task states.
-            client_->poll();
-            // Check only the tasks belonging to this specific batch.
-            if (!client_->HasPendingTasksForBatch(batch_id)) {
-                NIXL_DEBUG << "KVTC: batch=" << batch_id << " all tasks completed";
-                return NIXL_SUCCESS;
-            }
-        }
-        std::this_thread::sleep_for(POLL_INTERVAL);
-    }
+    // Pre-populate out_descs with worst-case output buffer descriptors.
+    // The engine updates actual sizes in poll() when the batch completes.
+    out_descs.clear();
+    out_descs.reserve(src_descs.size());
+    for (const auto &desc : src_descs)
+        out_descs.emplace_back(desc.addr, GetMaxBuffersize(desc.len, operation),
+                               desc.devId, nixl_blob_t{});
+
+    svc_req_out = batch_id;
+    NIXL_DEBUG << "KVTC processDataAsync: batch=" << batch_id << " submitted, returning immediately";
+    return NIXL_SUCCESS;
+}
+
+nixl_status_t nixlKvtcServiceEngine::poll(uint64_t svc_req,
+                                           std::vector<nixlBlobDesc> &out_descs) {
+    if (client_ == nullptr)
+        return NIXL_ERR_BACKEND;
+
+    // Tick the DOCA PE once under the mutex (brief critical section).
+    // client_mutex_ serialises this call (service progress thread) with
+    // processDataAsync() (agent thread) to prevent concurrent DOCA PE access.
+    std::lock_guard<std::mutex> lk(client_mutex_);
+    client_->poll();
+
+    if (client_->HasPendingTasksForBatch(svc_req))
+        return NIXL_IN_PROG;
+
+    // Batch complete. If the engine can report actual compressed sizes from
+    // the completed task results, update out_descs here. For now the worst-case
+    // sizes set by processDataAsync() are kept as-is; actual sizes can be wired in
+    // once HostClient exposes per-task output length.
+    NIXL_DEBUG << "KVTC poll: batch=" << svc_req << " complete";
+    (void)out_descs; // placeholder until actual sizes are available
+    return NIXL_SUCCESS;
 }

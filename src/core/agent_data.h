@@ -17,11 +17,20 @@
 #ifndef __AGENT_DATA_H_
 #define __AGENT_DATA_H_
 
+#include <atomic>
+#include <mutex>
+#include <thread>
+#include <vector>
+
 #include "common/str_tools.h"
 #include "mem_section.h"
 #include "telemetry.h"
 #include "stream/metadata_stream.h"
 #include "sync.h"
+#include "nixl_service_manager.h"
+
+// Forward declaration for service PT support
+class nixlXferReqH;
 
 
 #if HAVE_ETCD
@@ -123,6 +132,22 @@ class nixlAgentData {
         invalidateRemoteData(const std::string &remote_name);
         [[nodiscard]] static backend_set_t
         getBackends(const nixl_opt_args_t *opt_args, nixlMemSection *section, nixl_mem_t mem_type);
+
+        // Agent-owned service progress thread pool (service_enable_pt / service_progress_threads).
+        // Threads are shared across all services and requests owned by this agent.
+        // Each thread repeatedly calls poll() on pending service requests and fires
+        // the fluent backend handoff (postXfer) the moment poll() signals completion.
+        std::vector<nixlXferReqH*> svcPending_;      // pending service requests
+        std::mutex                 svcPendingLock_;   // guards svcPending_
+        std::vector<std::thread>   svcProgThreads_;   // the PT pool
+        std::atomic<bool>          svcProgStop_{false};
+
+        // Agent-owned service instances created via addService().
+        // Destroyed when the agent is destroyed (after the PT pool is stopped).
+        nixlServiceManager         svcManager_;
+        std::vector<nixlServiceH*> serviceHandles_;
+
+        void svcProgressLoop();
 
     public:
         nixlAgentData(const std::string &name, const nixlAgentConfig &cfg);

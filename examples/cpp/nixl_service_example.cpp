@@ -20,7 +20,11 @@
  * @brief Example demonstrating the NIXL service plugin with local/storage backends (POSIX, GDS, etc.)
  *
  * The service plugin operates in-place: it transforms the source buffer before the
- * backend transfer begins. No separate "processed" buffer is needed.
+ * backend transfer begins.
+ *
+ * Service lifecycle is managed directly through nixlAgent:
+ *   agent.getAvailServicePlugins() / getServicePluginParams() / addService()
+ * The service handle is passed per-request via nixl_opt_args_t::serviceH.
  *
  * The example demonstrates:
  * - WRITE operation: service processes DRAM buffer in-place, then transfers to file
@@ -40,7 +44,6 @@
 
 #include "nixl.h"
 #include "test_utils.h"
-#include "nixl_service_manager.h"
 
 std::string agent_name("LocalAgent");
 
@@ -60,6 +63,21 @@ void printParams(const nixl_b_params_t& params, const nixl_mem_list_t& mems) {
         for (const auto& elm : mems)
             std::cout << "  " << nixlEnumStrings::memTypeStr(elm) << "\n";
     }
+}
+
+void printServiceMems(const nixl_service_mems_t& mems) {
+    auto printList = [](const char* label, const nixl_mem_list_t& list) {
+        std::cout << "  " << label << ":";
+        if (list.empty()) {
+            std::cout << " (none)\n";
+        } else {
+            std::cout << "\n";
+            for (const auto& m : list)
+                std::cout << "    " << nixlEnumStrings::memTypeStr(m) << "\n";
+        }
+    };
+    printList("input ", mems.input);
+    printList("output", mems.output);
 }
 
 // Structure to hold parsed command-line arguments
@@ -198,42 +216,46 @@ void registerMemory(nixlAgent& agent,
     std::cout << "  Destination file\n\n";
 }
 
-// Create a service handle using nixlServiceManager
-nixlServiceH* createService(nixlServiceManager& svc_mgr) {
+// Create a service handle using the agent's service API
+nixlServiceH* createService(nixlAgent& agent) {
     nixl_service_t service_type = "kvtc";
 
-    std::cout << "Creating service via nixlServiceManager...\n";
+    std::cout << "Creating service via nixlAgent...\n";
 
     std::vector<nixl_service_t> available;
-    svc_mgr.getAvailPlugins(available);
+    agent.getAvailServicePlugins(available);
     std::cout << "  Available service plugins:\n";
     for (const auto& s : available)
-        std::cout << "    - " << s << "\n";
+        std::cout << "    - " << s << "\n"; // validate service type exists in available plugins
 
-    nixl_b_params_t params;
-    nixl_status_t ret = svc_mgr.getPluginParams(service_type, params);
+    nixl_service_mems_t mems;
+    nixl_s_params_t params;
+    nixl_status_t ret = agent.getServicePluginParams(service_type, mems, params);
     if (ret != NIXL_SUCCESS)
-        std::cerr << "  Warning: getPluginParams failed (" << ret << "); using empty params\n";
+        std::cerr << "  Warning: getServicePluginParams failed (" << ret << ")\n";
+    else {
+        std::cout << "  Supported memory types:\n";
+        printServiceMems(mems);
+    }
 
-    params["dev_bdf"]      = "0000:81:00.0";
-    params["server_name"]  = "kvtc_demo";
+    params["dev_bdf"]     = "0000:81:00.0";
+    params["server_name"] = "kvtc_demo";
 
     nixlServiceH* svc_h = nullptr;
-    ret = svc_mgr.createService(service_type, params, svc_h);
+    ret = agent.addService(service_type, mems, params, svc_h);
     if (ret != NIXL_SUCCESS || svc_h == nullptr) {
-        std::cerr << "  Warning: createService failed (" << ret << "); no service will be used\n";
+        std::cerr << "  Warning: addService failed (" << ret << ")\n";
         return nullptr;
     }
 
-    std::cout << "  Service created: " << service_type << " (in-place)\n\n";
+    std::cout << "  Service added: " << service_type << " (in-place, agent-owned)\n\n";
     return svc_h;
 }
 
 // Perform WRITE operation: service processes src_buffer in-place, then transfer to file
 void performWriteOperation(nixlAgent& agent,
                            const BufferResources& resources,
-                           nixl_opt_args_t& extra_params,
-                           nixlServiceH* svc_h) {
+                           nixl_opt_args_t& extra_params) {
     nixl_status_t ret;
 
     std::cout << "========================================\n";
@@ -262,7 +284,7 @@ void performWriteOperation(nixlAgent& agent,
 
     nixlXferReqH *req_handle;
     ret = agent.createXferReq(NIXL_WRITE, src_xfer_descs, dst_xfer_descs,
-                              agent_name, req_handle, &extra_params, svc_h);
+                              agent_name, req_handle, &extra_params);
     nixl_exit_on_failure(ret, "Failed to create transfer request", agent_name);
 
     std::cout << "Posting transfer request...\n";
@@ -284,8 +306,7 @@ void performWriteOperation(nixlAgent& agent,
 // Perform READ operation: read file into DRAM buffer, then service processes in-place
 void performReadOperation(nixlAgent& agent,
                           const BufferResources& resources,
-                          nixl_opt_args_t& extra_params,
-                          nixlServiceH* svc_h) {
+                          nixl_opt_args_t& extra_params) {
     nixl_status_t ret;
 
     std::cout << "========================================\n";
@@ -332,7 +353,7 @@ void performReadOperation(nixlAgent& agent,
 
     nixlXferReqH *read_req_handle;
     ret = agent.createXferReq(NIXL_READ, read_local_descs, read_remote_descs,
-                              agent_name, read_req_handle, &extra_params, svc_h);
+                              agent_name, read_req_handle, &extra_params);
     nixl_exit_on_failure(ret, "Failed to create READ transfer request", agent_name);
 
     std::cout << "Posting READ transfer request...\n";
@@ -380,16 +401,28 @@ int main(int argc, char **argv) {
     std::cout << "Mode:    in-place\n";
     std::cout << "========================================\n\n";
 
-    nixlAgentConfig cfg(false);
+    // Configure agent with service progress threads.
+    // The agent's PT pool is shared across all services and requests.
+    // Set service_enable_pt=false to fall back to external polling
+    // (getXferStatus drives poll() on each user call instead).
+    nixlAgentConfig cfg(true); // enable backend progress thread
+    cfg.service_enable_pt        = true; // enable agent-owned service PT pool
+    cfg.service_progress_threads = 1;    // one service progress thread
+
+    std::cout << "Service progress thread: "
+              << (cfg.service_enable_pt
+                      ? "ENABLED (agent-owned, " +
+                            std::to_string(cfg.service_progress_threads) + " thread(s))"
+                      : "DISABLED (external polling via getXferStatus)")
+              << "\n\n";
+
     nixlAgent agent(agent_name, cfg);
     nixl_opt_args_t extra_params;
 
     initializeAgentAndBackend(args.backend, agent, extra_params);
     std::cout << "Backend created successfully\n\n";
 
-    // Create service — plugin transforms src_buffer in-place before each transfer
-    nixlServiceManager svc_mgr;
-    nixlServiceH* svc_h = createService(svc_mgr);
+    nixlServiceH* svc_h = createService(agent);
 
     BufferResources resources = allocateBuffers();
     size_t max_sz = resources.buffer_size;
@@ -412,9 +445,10 @@ int main(int argc, char **argv) {
               << " (fd: " << resources.dst_fd << ", size: " << resources.output_buffer_size << " bytes)\n\n";
 
     registerMemory(agent, resources, extra_params);
+    extra_params.serviceH  = svc_h;
 
     // WRITE: service processes src_buffer in-place, then backend writes to file
-    performWriteOperation(agent, resources, extra_params, svc_h);
+    performWriteOperation(agent, resources, extra_params);
 
     // READ: backend reads file into DRAM, then service processes in-place
     // performReadOperation(agent, resources, extra_params, svc_h);
@@ -441,11 +475,6 @@ int main(int argc, char **argv) {
     dereg_dst.addDesc(dst_dereg);
     ret = agent.deregisterMem(dereg_dst, &extra_params);
     nixl_exit_on_failure(ret, "Failed to deregister destination file", agent_name);
-
-    if (svc_h) {
-        svc_mgr.destroyService(svc_h);
-        std::cout << "Service destroyed\n";
-    }
 
     cleanupResources(resources);
 

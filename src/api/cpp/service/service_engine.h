@@ -24,18 +24,31 @@
 
 // Initialization parameters for service engine
 struct nixlServiceInitParams {
-    nixl_service_t type;                // Service type
+    nixl_service_t type;                 // Service type
     const nixl_s_params_t* customParams; // Custom parameters
+    nixl_service_mems_t mems;            // Supported input/output memory types
 };
 
 // Base service engine class for different service implementations.
 //
-// Threading contract: the engine is purely synchronous and has no knowledge
-// of callbacks or threads. nixl wraps each transfer request in a dedicated
-// std::thread that calls processData() and, after it returns, initiates the
-// backend transfer. Plugins must be thread-safe only in the sense that
-// concurrent requests call processData() concurrently (serialising internally
-// where needed, e.g. via a mutex around a single-threaded hardware context).
+// Threading contract:
+//   Each service instance is thread-safe and non-blocking. Engines have no internal
+//   worker threads. The agent's service PT pool (configured via service_enable_pt and
+//   service_progress_threads in nixlAgentConfig) drives progress for all service
+//   requests across all services.
+//
+// Agent-PT path (service_enable_pt == true):
+//   postXferReq calls processDataAsync() (non-blocking) to dispatch work, then enqueues
+//   the request. The agent's shared PT pool loops calling poll() for every pending
+//   request; when poll returns NIXL_SUCCESS the thread immediately calls backend
+//   postXfer() in the same context (fluent handoff).
+//   The engine must be safe to call processDataAsync() from the agent thread and poll()
+//   from the progress thread concurrently.
+//
+// External-polling path (service_enable_pt == false):
+//   postXferReq calls processDataAsync() (non-blocking). Each call to getXferStatus()
+//   calls poll() once to advance the service state machine. On NIXL_SUCCESS,
+//   getXferStatus immediately calls backend postXfer() (fluent handoff).
 class nixlServiceEngine {
 private:
     nixl_service_t serviceType_;
@@ -67,6 +80,8 @@ protected:
 public:
     explicit nixlServiceEngine(const nixlServiceInitParams* init_params)
         : serviceType_(init_params->type),
+          inputMems_(init_params->mems.input),
+          outputMems_(init_params->mems.output),
           customParams_(init_params->customParams ? *init_params->customParams : nixl_s_params_t{}) {}
 
     nixlServiceEngine(nixlServiceEngine&&) = delete;
@@ -90,15 +105,26 @@ public:
     // op: NIXL_WRITE (encode path) or NIXL_READ (decode path)
     virtual size_t GetMaxBuffersize(size_t input_size, nixl_xfer_op_t op) const = 0;
 
-    // Perform the data transformation synchronously.
-    // Blocks until the operation is fully complete and returns NIXL_SUCCESS,
-    // or a negative error code on failure.
-    //
-    // Called from a dedicated per-request thread spawned by nixl. The engine
-    // must serialize any internal hardware context accesses itself (e.g. via
-    // a mutex) when multiple requests are processed concurrently.
-    virtual nixl_status_t processData(const nixl_xfer_op_t &operation,
-                                      const std::vector<nixlBlobDesc> &data_descs) = 0;
+    // Non-blocking submission. Called on the agent thread from postXferReq.
+    // Must dispatch work to hardware and return immediately.
+    // Fills out_descs with pre-allocated output buffer descriptors (at minimum
+    // worst-case sizes); the engine may update them in poll() on completion.
+    // svc_req_out is an opaque handle that uniquely identifies this request for
+    // all subsequent poll() calls.
+    virtual nixl_status_t processDataAsync(const nixl_xfer_op_t &operation,
+                                       const std::vector<nixlBlobDesc> &src_descs,
+                                       std::vector<nixlBlobDesc> &out_descs,
+                                       const nixl_s_params_t *service_meta,
+                                       uint64_t &svc_req_out) = 0;
+
+    // Non-blocking progress tick for one request. Returns NIXL_IN_PROG while busy,
+    // NIXL_SUCCESS when done, or a negative error code on failure.
+    // On NIXL_SUCCESS the engine may update out_descs with actual output sizes or
+    // addresses (e.g. actual compressed size reported by hardware).
+    // Called from the agent's service PT pool (agent-PT path) or from
+    // getXferStatus on each user call (external-polling path).
+    virtual nixl_status_t poll(uint64_t svc_req,
+                               std::vector<nixlBlobDesc> &out_descs) = 0;
 
 };
 

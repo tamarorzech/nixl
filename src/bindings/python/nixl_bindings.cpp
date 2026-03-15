@@ -164,6 +164,24 @@ PYBIND11_MODULE(_bindings, m) {
         .value("FILE_SEG", FILE_SEG)
         .export_values();
 
+    py::class_<nixl_service_mems_t>(m, "nixl_service_mems_t")
+        .def(py::init<>())
+        .def_readwrite("input",  &nixl_service_mems_t::input)
+        .def_readwrite("output", &nixl_service_mems_t::output)
+        .def("__repr__", [](const nixl_service_mems_t &s) {
+            auto listStr = [](const nixl_mem_list_t &lst) {
+                std::string r = "[";
+                for (size_t i = 0; i < lst.size(); ++i) {
+                    if (i) r += ", ";
+                    r += nixlEnumStrings::memTypeStr(lst[i]);
+                }
+                r += "]";
+                return r;
+            };
+            return "nixl_service_mems_t(input=" + listStr(s.input)
+                 + ", output=" + listStr(s.output) + ")";
+        });
+
     py::enum_<nixl_xfer_op_t>(m, "nixl_xfer_op_t")
         .value("NIXL_READ", NIXL_READ)
         .value("NIXL_WRITE", NIXL_WRITE)
@@ -414,8 +432,8 @@ PYBIND11_MODULE(_bindings, m) {
                 return newObj;
             }));
 
-    // nixlServiceH: opaque handle for a service instance, created by nixlServiceManager.
-    // Exposed as a non-owning wrapper (lifetime managed by nixlServiceManager::destroyService).
+    // nixlServiceH: opaque handle for a service instance, created by nixlAgent::addService().
+    // Exposed as a non-owning wrapper (lifetime managed by the agent that created it).
     py::class_<nixlServiceH, std::unique_ptr<nixlServiceH, py::nodelete>>(m, "nixlServiceH")
         .def("getType",
              &nixlServiceH::getType,
@@ -454,22 +472,26 @@ PYBIND11_MODULE(_bindings, m) {
              "Return list of available service plugin names.")
         .def("getPluginParams",
              [](nixlServiceManager &mgr,
-                const nixl_service_t &type) -> nixl_s_params_t {
-                 nixl_s_params_t params;
-                 throw_nixl_exception(mgr.getPluginParams(type, params));
-                 return params;
+                const nixl_service_t &type)
+                    -> std::pair<nixl_s_params_t, nixl_service_mems_t> {
+                 nixl_s_params_t     params;
+                 nixl_service_mems_t mems;
+                 throw_nixl_exception(mgr.getPluginParams(type, mems, params));
+                 return std::make_pair(params, mems);
              },
              py::arg("type"),
-             "Return default initialization parameters for the given service plugin.")
+             "Return (params, nixl_service_mems_t) for the given service plugin.")
         .def("createService",
              [](nixlServiceManager &mgr,
-                const nixl_service_t &type,
-                const nixl_s_params_t &params) -> nixlServiceH * {
+                const nixl_service_t      &type,
+                const nixl_service_mems_t &mems,
+                const nixl_s_params_t     &params) -> nixlServiceH * {
                  nixlServiceH *handle = nullptr;
-                 throw_nixl_exception(mgr.createService(type, params, handle));
+                 throw_nixl_exception(mgr.createService(type, mems, params, handle));
                  return handle;
              },
              py::arg("type"),
+             py::arg("mems"),
              py::arg("params"),
              py::return_value_policy::reference,
              "Instantiate a service engine and return a handle. Caller must call destroyService().")
@@ -535,6 +557,38 @@ PYBIND11_MODULE(_bindings, m) {
                 return (uintptr_t)backend;
             },
             py::call_guard<py::gil_scoped_release>())
+        .def("getAvailServicePlugins",
+             [](nixlAgent &agent) -> std::vector<nixl_service_t> {
+                 std::vector<nixl_service_t> plugins;
+                 throw_nixl_exception(agent.getAvailServicePlugins(plugins));
+                 return plugins;
+             },
+             "Return list of available service plugin names.")
+        .def("getServicePluginParams",
+             [](nixlAgent &agent,
+                const nixl_service_t &type)
+                    -> std::pair<nixl_s_params_t, nixl_service_mems_t> {
+                 nixl_s_params_t     params;
+                 nixl_service_mems_t mems;
+                 throw_nixl_exception(agent.getServicePluginParams(type, mems, params));
+                 return std::make_pair(params, mems);
+             },
+             py::arg("type"),
+             "Return (params, nixl_service_mems_t) for the given service plugin.")
+        .def("addService",
+             [](nixlAgent &agent,
+                const nixl_service_t        &type,
+                const nixl_service_mems_t   &mems,
+                const nixl_s_params_t       &params) -> nixlServiceH * {
+                 nixlServiceH *handle = nullptr;
+                 throw_nixl_exception(agent.addService(type, mems, params, handle));
+                 return handle;
+             },
+             py::arg("type"),
+             py::arg("mems"),
+             py::arg("params"),
+             py::return_value_policy::reference,
+             "Instantiate a service engine and register it with this agent. Agent owns the handle.")
         .def(
             "registerMem",
             [](nixlAgent &agent,
@@ -710,19 +764,17 @@ PYBIND11_MODULE(_bindings, m) {
                     extra_params.hasNotif = true;
                 }
 
-                nixlServiceH *svc_ptr = nullptr;
-                if (!service_h.is_none()) {
-                    svc_ptr = service_h.cast<nixlServiceH *>();
-                }
+                // Service is passed via opt_args (design rev: service in opt_args, not extra params).
+                if (!service_h.is_none())
+                    extra_params.serviceH = service_h.cast<nixlServiceH *>();
 
                 nixl_s_params_t meta_params;
-                const nixl_s_params_t *meta_ptr = nullptr;
                 if (!service_meta.is_none()) {
                     for (const auto &item : service_meta.cast<py::dict>()) {
                         meta_params[item.first.cast<std::string>()] =
                             item.second.cast<std::string>();
                     }
-                    meta_ptr = &meta_params;
+                    extra_params.serviceMd = &meta_params;
                 }
 
                 nixl_status_t ret = agent.createXferReq(operation,
@@ -730,9 +782,7 @@ PYBIND11_MODULE(_bindings, m) {
                                                         remote_descs,
                                                         remote_agent,
                                                         handle,
-                                                        &extra_params,
-                                                        svc_ptr,
-                                                        meta_ptr);
+                                                        &extra_params);
 
                 throw_nixl_exception(ret);
                 return (uintptr_t)handle;

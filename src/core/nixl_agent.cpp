@@ -151,6 +151,86 @@ nixlAgentData::nixlAgentData(const std::string &name, const nixlAgentConfig &cfg
     }
 }
 
+// Service progress loop: polls all pending service requests and fires the
+// fluent backend handoff (postXfer) the moment poll() signals completion.
+void nixlAgentData::svcProgressLoop() {
+    const auto tid = std::this_thread::get_id();
+    std::cout << "[svc-agent-pt " << tid << "] started\n";
+
+    static constexpr auto POLL_INTERVAL = std::chrono::milliseconds(1);
+
+    while (!svcProgStop_.load(std::memory_order_relaxed)) {
+        // Poll all pending requests under the lock (ticks are non-blocking).
+        // Completed entries are moved out so their handoffs can be fired
+        // outside the lock to avoid nesting with the agent shared lock.
+        std::vector<std::pair<nixl_status_t, nixlXferReqH*>> to_fire;
+        bool had_work = false;
+        {
+            std::lock_guard<std::mutex> lk(svcPendingLock_);
+            had_work = !svcPending_.empty();
+            for (auto it = svcPending_.begin(); it != svcPending_.end(); ) {
+                nixlXferReqH *req = *it;
+                nixl_status_t s = req->service_h->poll(req->svc_req_, req->out_descs_);
+                if (s != NIXL_IN_PROG) {
+                    std::cout << "[svc-agent-pt " << tid << "] svc_req="
+                              << req->svc_req_ << " done (status=" << s << ")\n";
+                    to_fire.emplace_back(s, req);
+                    it = svcPending_.erase(it);
+                } else {
+                    ++it;
+                }
+            }
+        }
+
+        // Fluent handoff: outside svcPendingLock_ to avoid nested locking with
+        // the agent shared lock acquired inside postXfer().
+        for (auto &[svc_status, req] : to_fire) {
+            std::cout << "[svc-agent-pt " << tid
+                      << "] handoff for svc_req=" << req->svc_req_ << "\n";
+            if (svc_status < 0) {
+                NIXL_ERROR << "Service: work failed (" << svc_status << ")";
+                req->svc_post_result_ = NIXL_ERR_BACKEND;
+            } else {
+                // Apply actual output sizes from the engine.
+                for (int i = 0; i < req->initiatorDescs->descCount(); i++) {
+                    if (i < static_cast<int>(req->out_descs_.size()))
+                        (*req->initiatorDescs)[i].len =
+                            req->out_descs_[static_cast<size_t>(i)].len;
+                }
+
+                // Fluent handoff: acquire the agent shared lock and post to backend.
+                nixl_opt_b_args_t svc_opt_args;
+                svc_opt_args.hasNotif = req->hasNotif;
+                svc_opt_args.notifMsg = req->notifMsg;
+                nixl_status_t post_result;
+                {
+                    NIXL_SHARED_LOCK_GUARD(lock);
+                    post_result = req->engine->postXfer(
+                        req->backendOp,
+                        *req->initiatorDescs,
+                        *req->targetDescs,
+                        req->remoteAgent,
+                        req->backendHandle,
+                        &svc_opt_args);
+                    if (post_result < 0) {
+                        NIXL_ERROR << "Service: backend postXfer failed (" << post_result << ")";
+                        addErrorTelemetry(post_result);
+                    }
+                }
+                req->svc_post_result_ = post_result;
+            }
+            // Release store: getXferStatus acquire-loads this flag before reading svc_post_result_.
+            req->svc_thread_done_.store(true, std::memory_order_release);
+        }
+
+        // Sleep only when there was no work to avoid busy-spinning.
+        if (!had_work)
+            std::this_thread::sleep_for(POLL_INTERVAL);
+    }
+
+    std::cout << "[svc-agent-pt " << tid << "] stopped\n";
+}
+
 nixlAgentData::~nixlAgentData() {
     delete memorySection;
 
@@ -191,6 +271,16 @@ nixlAgent::nixlAgent(const std::string &name, const nixlAgentConfig &cfg) :
         data->agentShutdown = false;
         data->commThread = std::thread(&nixlAgentData::commWorker, data.get(), std::ref(*this));
     }
+
+    // Start agent-owned service progress thread pool if configured.
+    if (cfg.service_enable_pt && cfg.service_progress_threads > 0) {
+        data->svcProgStop_.store(false, std::memory_order_relaxed);
+        data->svcProgThreads_.reserve(static_cast<size_t>(cfg.service_progress_threads));
+        for (int i = 0; i < cfg.service_progress_threads; ++i)
+            data->svcProgThreads_.emplace_back(&nixlAgentData::svcProgressLoop, data.get());
+        NIXL_DEBUG << "Started " << cfg.service_progress_threads
+                   << " agent service progress thread(s)";
+    }
 }
 
 nixlAgent::~nixlAgent() {
@@ -222,6 +312,20 @@ nixlAgent::~nixlAgent() {
             if(data->listener) delete data->listener;
         }
     }
+
+    // Stop agent service progress thread pool.
+    if (!data->svcProgThreads_.empty()) {
+        data->svcProgStop_.store(true, std::memory_order_relaxed);
+        for (auto &t : data->svcProgThreads_)
+            if (t.joinable()) t.join();
+        NIXL_DEBUG << "Stopped " << data->svcProgThreads_.size()
+                   << " agent service progress thread(s)";
+    }
+
+    // Destroy all services registered with this agent.
+    for (auto *svc_h : data->serviceHandles_)
+        data->svcManager_.destroyService(svc_h);
+    data->serviceHandles_.clear();
 }
 
 nixl_status_t
@@ -280,6 +384,59 @@ nixlAgent::getBackendParams (const nixlBackendH* backend,
     NIXL_LOCK_GUARD(data->lock);
     mems   = backend->engine->getSupportedMems();
     params = backend->engine->getCustomParams();
+    return NIXL_SUCCESS;
+}
+
+nixl_status_t
+nixlAgent::getAvailServicePlugins(std::vector<nixl_service_t> &plugins) {
+    return data->svcManager_.getAvailPlugins(plugins);
+}
+
+nixl_status_t
+nixlAgent::getServicePluginParams(const nixl_service_t &type,
+                                  nixl_service_mems_t  &mems,
+                                  nixl_s_params_t      &params) const {
+    return data->svcManager_.getPluginParams(type, mems, params);
+}
+
+nixl_status_t
+nixlAgent::addService(const nixl_service_t      &type,
+                      const nixl_service_mems_t &mems,
+                      const nixl_s_params_t     &params,
+                      nixlServiceH*             &handle) {
+    handle = nullptr;
+
+    // Validate requested mems against what the plugin supports.
+    nixl_service_mems_t supported;
+    nixl_s_params_t     default_params;
+    nixl_status_t       ret = data->svcManager_.getPluginParams(type, supported, default_params);
+    if (ret != NIXL_SUCCESS)
+        return ret;
+
+    auto isMember = [](const nixl_mem_list_t &list, nixl_mem_t mem) {
+        for (const auto &m : list) if (m == mem) return true;
+        return false;
+    };
+    for (const auto &m : mems.input) {
+        if (!isMember(supported.input, m)) {
+            NIXL_ERROR << "Service '" << type << "': requested input mem type "
+                       << m << " is not supported by the plugin";
+            return NIXL_ERR_INVALID_PARAM;
+        }
+    }
+    for (const auto &m : mems.output) {
+        if (!isMember(supported.output, m)) {
+            NIXL_ERROR << "Service '" << type << "': requested output mem type "
+                       << m << " is not supported by the plugin";
+            return NIXL_ERR_INVALID_PARAM;
+        }
+    }
+
+    ret = data->svcManager_.createService(type, mems, params, handle);
+    if (ret != NIXL_SUCCESS || !handle)
+        return ret;
+    data->serviceHandles_.push_back(handle);
+    NIXL_DEBUG << "Agent registered service: " << type;
     return NIXL_SUCCESS;
 }
 
@@ -853,9 +1010,9 @@ nixlAgent::createXferReq(const nixl_xfer_op_t &operation,
                          const nixl_xfer_dlist_t &remote_descs,
                          const std::string &remote_agent,
                          nixlXferReqH* &req_hndl,
-                         const nixl_opt_args_t* extra_params,
-                         nixlServiceH* service_h,
-                         const nixl_s_params_t* service_meta) const {
+                         const nixl_opt_args_t* extra_params) const {
+    nixlServiceH*          service_h    = extra_params ? extra_params->serviceH  : nullptr;
+    const nixl_s_params_t* service_meta = extra_params ? extra_params->serviceMd : nullptr;
     nixl_status_t     ret1, ret2;
     nixl_opt_b_args_t opt_args;
 
@@ -1107,88 +1264,55 @@ nixlAgent::postXferReq(nixlXferReqH *req_hndl,
         return NIXL_ERR_BACKEND;
     }
 
-    // If a service is attached, spawn a dedicated thread for this request and
-    // return IN_PROG immediately. The thread:
-    //   1. Calls service_h->processData() which blocks until the service work is done.
-    //   2. Adjusts descriptor sizes to reflect the service output.
-    //   3. Posts to the backend (acquiring the agent's shared lock, same as the
-    //      normal non-service path).
-    //   4. Stores the postXfer result in svc_post_result_ and signals
-    //      svc_thread_done_ with a release store.
+    // If a service is attached, dispatch work non-blocking and return IN_PROG.
     //
-    // getXferStatus checks svc_thread_done_ with a non-blocking acquire load.
-    // The release/acquire pair provides the happens-before guarantee that makes
-    // svc_post_result_ safely readable without a mutex.
+    // Two sub-paths, both non-blocking — no per-request thread is spawned:
+    //
+    // Agent-PT path (agent has service PT threads && engine supports it):
+    //   processDataAsync() dispatches work to hardware and returns svc_req_ + out_descs_.
+    //   The request is enqueued into the agent's svcPending_ list. The agent's
+    //   service progress thread(s) loop calling engine->poll() for every pending
+    //   request and, on success, immediately fire the fluent handoff: they update
+    //   descriptors, call postXfer() under the agent shared lock, and set
+    //   svc_post_result_ + svc_thread_done_ (release store).
+    //   getXferStatus reads svc_thread_done_ with an acquire load.
+    //
+    // External-polling path (no agent PT threads, or engine does not support it):
+    //   processDataAsync() dispatches work and stores svc_req_ + out_descs_ in the
+    //   request handle. Each call to getXferStatus() ticks the service state
+    //   machine via service_h->poll(svc_req_, out_descs_) and, on SUCCESS,
+    //   immediately calls postXfer() (fluent handoff, no extra user call).
     if (req_hndl->service_h != nullptr) {
-        NIXL_INFO << "Service '" << req_hndl->service_h->getType()
-                  << "': spawning per-request thread; postXferReq returning IN_PROG";
-
-        nixlAgentData *agent_data = data.get(); // stays alive for the agent's lifetime
-
-        // Build blob descriptors from the initiator list.
-        std::vector<nixlBlobDesc> data_blobs;
-        data_blobs.reserve(static_cast<size_t>(req_hndl->initiatorDescs->descCount()));
+        // Build source blob descriptors from the initiator list (both paths).
+        std::vector<nixlBlobDesc> src_blobs;
+        src_blobs.reserve(static_cast<size_t>(req_hndl->initiatorDescs->descCount()));
         for (int i = 0; i < req_hndl->initiatorDescs->descCount(); i++) {
             const auto &d = (*req_hndl->initiatorDescs)[i];
-            data_blobs.emplace_back(d.addr, d.len, d.devId, nixl_blob_t{});
+            src_blobs.emplace_back(d.addr, d.len, d.devId, nixl_blob_t{});
         }
 
-        // Spawn the per-request thread. data_blobs is moved in so the thread
-        // owns its own copy; all other captures are raw pointers that outlive
-        // the thread (agent_data lives for the agent's lifetime; req_hndl is
-        // joined in nixlXferReqH's destructor before memory is freed).
-        req_hndl->svc_thread_ = std::thread(
-            [req_hndl, agent_data, data_blobs = std::move(data_blobs)]() {
+        // Non-blocking dispatch for both paths.
+        nixl_status_t ret = req_hndl->service_h->processDataAsync(
+            req_hndl->backendOp, src_blobs, req_hndl->out_descs_,
+            req_hndl->service_meta, req_hndl->svc_req_);
+        if (ret < 0) {
+            NIXL_ERROR << "Service processDataAsync failed (" << ret << ")";
+            data->addErrorTelemetry(ret);
+            return ret;
+        }
 
-                // processData blocks until the service work is fully complete.
-                nixl_status_t svc_status = req_hndl->service_h->processData(
-                    req_hndl->backendOp, data_blobs);
-
-                if (svc_status < 0) {
-                    NIXL_ERROR << "Service thread: processData failed (" << svc_status << ")";
-                    req_hndl->svc_post_result_ = NIXL_ERR_BACKEND;
-                    req_hndl->svc_thread_done_.store(true, std::memory_order_release);
-                    return;
-                }
-
-                NIXL_INFO << "Service thread: processData done; "
-                             "adjusting descriptors and posting to backend";
-
-                // Adjust descriptor sizes to reflect service output.
-                for (int i = 0; i < req_hndl->initiatorDescs->descCount(); i++) {
-                    auto &desc = (*req_hndl->initiatorDescs)[i];
-                    desc.len = req_hndl->service_h->GetMaxBuffersize(
-                        desc.len, req_hndl->backendOp);
-                }
-
-                // Post to backend under the shared agent lock (same as the
-                // normal non-service path).
-                nixl_opt_b_args_t svc_opt_args;
-                svc_opt_args.hasNotif = req_hndl->hasNotif;
-                svc_opt_args.notifMsg = req_hndl->notifMsg;
-                nixl_status_t post_result;
-                {
-                    NIXL_SHARED_LOCK_GUARD(agent_data->lock);
-                    post_result = req_hndl->engine->postXfer(
-                        req_hndl->backendOp,
-                        *req_hndl->initiatorDescs,
-                        *req_hndl->targetDescs,
-                        req_hndl->remoteAgent,
-                        req_hndl->backendHandle,
-                        &svc_opt_args);
-                    if (post_result < 0) {
-                        NIXL_ERROR << "Service thread: backend postXfer failed ("
-                                   << post_result << ")";
-                        agent_data->addErrorTelemetry(post_result);
-                    }
-                }
-
-                // Publish result. svc_post_result_ is written before the release
-                // store so that getXferStatus can read it safely after an acquire
-                // load on svc_thread_done_ — no mutex needed.
-                req_hndl->svc_post_result_ = post_result;
-                req_hndl->svc_thread_done_.store(true, std::memory_order_release);
-            });
+        const bool use_agent_pt = !data->svcProgThreads_.empty();
+        if (use_agent_pt) {
+            // Agent-PT path: hand off to the agent's service progress thread pool.
+            NIXL_INFO << "Service '" << req_hndl->service_h->getType()
+                      << "': enqueued to agent service PT; returning IN_PROG";
+            std::lock_guard<std::mutex> lk(data->svcPendingLock_);
+            data->svcPending_.push_back(req_hndl);
+        } else {
+            // External-polling path: getXferStatus() will drive poll() on each call.
+            NIXL_INFO << "Service '" << req_hndl->service_h->getType()
+                      << "': submitted via processDataAsync (external polling); returning IN_PROG";
+        }
 
         req_hndl->service_phase_pending = true;
         req_hndl->status = NIXL_IN_PROG;
@@ -1236,39 +1360,87 @@ nixlAgent::getXferStatus (nixlXferReqH *req_hndl) const {
 
     NIXL_SHARED_LOCK_GUARD(data->lock);
 
-    // --- Service phase: check whether the per-request thread has finished --------
-    // The thread calls service_h->processData() (blocking) and, once the service
-    // work is done, posts to the backend and signals svc_thread_done_ with a
-    // release store. We check svc_thread_done_ with a non-blocking acquire load
-    // so getXferStatus never blocks the caller.
-    // This check must come BEFORE the generic status check because the thread
-    // never writes to req_hndl->status (to avoid a data race); only we do here,
-    // after the acquire establishes happens-before.
+    // --- Service phase -----------------------------------------------------------
+    // This block must come BEFORE the generic status check because neither code
+    // path writes req_hndl->status until we do so here, after the appropriate
+    // synchronisation (acquire load or inline completion).
     if (req_hndl->service_phase_pending) {
-        if (!req_hndl->svc_thread_done_.load(std::memory_order_acquire)) {
-            return NIXL_IN_PROG; // Thread still running; don't block the caller
-        }
-        // Thread is done. The acquire load above provides the happens-before guarantee
-        // that makes svc_post_result_ (written by the thread before the release store)
-        // safely readable here.
+        const bool use_agent_pt = !data->svcProgThreads_.empty();
 
-        req_hndl->service_phase_pending = false;
-        req_hndl->status = req_hndl->svc_post_result_; // set by thread before release store
+        if (!use_agent_pt) {
+            // External-polling path: drive one service tick per getXferStatus call.
+            // poll() is a non-blocking tick; it returns NIXL_IN_PROG while busy
+            // and NIXL_SUCCESS (optionally updating out_descs_) when done.
+            nixl_status_t svc_s = req_hndl->service_h->poll(
+                req_hndl->svc_req_, req_hndl->out_descs_);
 
-        if (req_hndl->status < 0) {
-            NIXL_ERROR_FUNC << "Service thread failed with status: " << req_hndl->status;
-            data->addErrorTelemetry(req_hndl->status);
-            return req_hndl->status;
+            if (svc_s == NIXL_IN_PROG)
+                return NIXL_IN_PROG;
+
+            if (svc_s < 0) {
+                NIXL_ERROR_FUNC << "Service poll failed (" << svc_s << ")";
+                data->addErrorTelemetry(svc_s);
+                return svc_s;
+            }
+
+            // Service done. Fluent handoff: update descriptors and post to backend
+            // immediately in this same calling context (agent shared lock is already held).
+            NIXL_INFO << "Service poll succeeded; updating descriptors and posting to backend";
+            for (int i = 0; i < req_hndl->initiatorDescs->descCount(); i++) {
+                if (i < static_cast<int>(req_hndl->out_descs_.size()))
+                    (*req_hndl->initiatorDescs)[i].len =
+                        req_hndl->out_descs_[static_cast<size_t>(i)].len;
+            }
+
+            nixl_opt_b_args_t svc_opt_args;
+            svc_opt_args.hasNotif = req_hndl->hasNotif;
+            svc_opt_args.notifMsg = req_hndl->notifMsg;
+            req_hndl->status = req_hndl->engine->postXfer(
+                req_hndl->backendOp,
+                *req_hndl->initiatorDescs,
+                *req_hndl->targetDescs,
+                req_hndl->remoteAgent,
+                req_hndl->backendHandle,
+                &svc_opt_args);
+            req_hndl->service_phase_pending = false;
+
+            if (req_hndl->status < 0) {
+                NIXL_ERROR_FUNC << "Service→backend postXfer failed (" << req_hndl->status << ")";
+                data->addErrorTelemetry(req_hndl->status);
+                return req_hndl->status;
+            }
+            if (data->telemetryEnabled && req_hndl->status != NIXL_IN_PROG)
+                req_hndl->updateRequestStats(data->telemetry_, NIXL_TELEMETRY_POST_AND_FINISH);
+            else if (data->telemetryEnabled)
+                req_hndl->updateRequestStats(data->telemetry_, NIXL_TELEMETRY_POST);
+
+            if (req_hndl->status != NIXL_IN_PROG)
+                return req_hndl->status;
+
+        } else {
+            // Agent-PT path: check whether the agent's service progress thread has
+            // completed the handoff (called postXfer and set svc_thread_done_).
+            // Acquire load provides happens-before with the release store in
+            // svcProgressLoop, making svc_post_result_ safely readable without a mutex.
+            if (!req_hndl->svc_thread_done_.load(std::memory_order_acquire))
+                return NIXL_IN_PROG; // agent progress thread still working
+
+            req_hndl->service_phase_pending = false;
+            req_hndl->status = req_hndl->svc_post_result_;
+
+            if (req_hndl->status < 0) {
+                NIXL_ERROR_FUNC << "Service progress thread failed (" << req_hndl->status << ")";
+                data->addErrorTelemetry(req_hndl->status);
+                return req_hndl->status;
+            }
+            if (data->telemetryEnabled && req_hndl->status != NIXL_IN_PROG)
+                req_hndl->updateRequestStats(data->telemetry_, NIXL_TELEMETRY_POST_AND_FINISH);
+            else if (data->telemetryEnabled)
+                req_hndl->updateRequestStats(data->telemetry_, NIXL_TELEMETRY_POST);
+
+            if (req_hndl->status != NIXL_IN_PROG)
+                return req_hndl->status;
         }
-        if (data->telemetryEnabled && req_hndl->status != NIXL_IN_PROG) {
-            req_hndl->updateRequestStats(data->telemetry_, NIXL_TELEMETRY_POST_AND_FINISH);
-        } else if (data->telemetryEnabled) {
-            req_hndl->updateRequestStats(data->telemetry_, NIXL_TELEMETRY_POST);
-        }
-        // If backend was already done (NIXL_SUCCESS), return now.
-        // Otherwise fall through to the backend polling section below.
-        if (req_hndl->status != NIXL_IN_PROG)
-            return req_hndl->status;
     }
 
     // If the status is done (success or error), no need to recheck backend.

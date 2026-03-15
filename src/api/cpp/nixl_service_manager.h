@@ -27,28 +27,27 @@
 
 /**
  * @class nixlServiceH
- * @brief User-facing handle for a created service instance.
+ * @brief Handle for a service instance created by nixlAgent::addService().
+ *        Thin stateless wrapper around a nixlServiceEngine plugin.
  *
- * Returned by nixlServiceManager::createService(). Owned by the application;
- * must remain valid for the lifetime of all transfer requests that reference it.
- * The nixlAgent does NOT take ownership of this handle.
+ * Owned by the agent; the pointer returned from addService() may be stored by
+ * the caller and passed in nixl_opt_args_t::serviceH for transfer requests.
+ * The agent is responsible for destroying service handles.
  *
- * When a transfer request with a service attached is posted, nixl spawns one
- * dedicated std::thread per request. That thread calls processData() — which
- * blocks until the service work is complete — and then immediately initiates
- * the backend transfer in the same thread. The engine itself has no knowledge
- * of threads or callbacks.
+ * Threading model (agent-owned progress threads):
+ *   Progress thread policy is set at the agent level via service_enable_pt and
+ *   service_progress_threads in nixlAgentConfig. The agent's shared PT pool
+ *   drives poll() for all pending service requests across all services and
+ *   immediately triggers the backend postXfer() on completion (fluent handoff).
+ *   When service_enable_pt is false, getXferStatus() drives poll() inline.
  *
- * The processData() method is called internally by nixlAgent and are not part
- * of the application-facing API.
+ * The internal methods (processDataAsync, poll) are called by nixlAgent and the
+ * agent's service progress threads and are not part of the application-facing API.
  */
 class nixlServiceH {
 public:
     /**
      * @brief Return the worst-case output buffer size for a given input and operation.
-     *
-     * Call this before createXferReq to size your buffers correctly.
-     *
      * @param input_size Size of the input data in bytes.
      * @param op         NIXL_WRITE (encode path) or NIXL_READ (decode path).
      * @return           Maximum number of bytes the service may produce.
@@ -60,18 +59,6 @@ public:
     /** @brief Return the service type string. */
     nixl_service_t getType() const { return engine_->getType(); }
 
-    // -- Internal API called by nixlAgent -- //
-
-    /** @brief Perform the data transformation synchronously.
-     *
-     *         Blocks until the engine has fully completed the operation.
-     *         Called from a dedicated per-request thread spawned by nixlAgent;
-     *         the caller runs the backend postXfer immediately after this returns. */
-    nixl_status_t processData(const nixl_xfer_op_t &op,
-                               const std::vector<nixlBlobDesc> &data_descs) {
-        return engine_->processData(op, data_descs);
-    }
-
     /** @brief Return supported input memory types (used for validation). */
     const nixl_mem_list_t& getSupportedInputMems() const {
         return engine_->getSupportedInputMems();
@@ -80,6 +67,42 @@ public:
     /** @brief Return supported output memory types (used for validation). */
     const nixl_mem_list_t& getSupportedOutputMems() const {
         return engine_->getSupportedOutputMems();
+    }
+
+    // -- Internal API called by nixlAgent -- //
+
+    /**
+     * @brief Non-blocking work submission. Returns a svc_req handle and
+     *        pre-allocated output descriptors. Called by postXferReq for both
+     *        progress-thread and external-polling paths.
+     *
+     * @param op           Transfer operation.
+     * @param src_descs    Source buffer descriptors.
+     * @param out_descs    [out] Pre-allocated output buffer descriptors.
+     * @param service_meta Per-request metadata; may be nullptr.
+     * @param svc_req_out  [out] Opaque handle for subsequent poll() calls.
+     * @return NIXL_SUCCESS if work was submitted; negative on error.
+     */
+    nixl_status_t processDataAsync(const nixl_xfer_op_t            &op,
+                               const std::vector<nixlBlobDesc>  &src_descs,
+                               std::vector<nixlBlobDesc>        &out_descs,
+                               const nixl_s_params_t            *service_meta,
+                               uint64_t                         &svc_req_out) {
+        return engine_->processDataAsync(op, src_descs, out_descs, service_meta, svc_req_out);
+    }
+
+    /**
+     * @brief One non-blocking progress tick for a pending service request.
+     *
+     * Delegates to engine->poll(). Returns NIXL_IN_PROG while busy,
+     * NIXL_SUCCESS when done (engine may update out_descs with actual sizes),
+     * or a negative error code on failure.
+     *
+     * Called by the agent's service progress threads (PT path) or by
+     * getXferStatus() once per user poll (external-polling path).
+     */
+    nixl_status_t poll(uint64_t svc_req, std::vector<nixlBlobDesc> &out_descs) {
+        return engine_->poll(svc_req, out_descs);
     }
 
 private:
@@ -94,29 +117,16 @@ private:
 
 /**
  * @class nixlServiceManager
- * @brief North-bound object for service plugin discovery and lifecycle management.
+ * @brief Internal factory for service plugin discovery and lifecycle management.
  *
- * Usage:
- * @code
- *   nixlServiceManager svc_mgr;
+ * This class is an internal implementation detail used by nixlAgent. Applications
+ * should use the agent's service API directly:
+ *   - nixlAgent::getAvailServicePlugins()
+ *   - nixlAgent::getServicePluginParams()
+ *   - nixlAgent::addService()
  *
- *   std::vector<nixl_service_t> plugins;
- *   svc_mgr.getAvailPlugins(plugins);
- *
- *   nixl_s_params_t params;
- *   svc_mgr.getPluginParams("kvtc", params);
- *   params["dev_bdf"] = "0000:81:00.0";
- *
- *   nixlServiceH *svc_h = nullptr;
- *   svc_mgr.createService("kvtc", params, svc_h);
- *
- *   size_t buf_sz = svc_h->GetMaxBuffersize(input_size, NIXL_WRITE);
- *
- *   agent.createXferReq(NIXL_WRITE, local, remote, name, req, nullptr, svc_h);
- *   // ... post / poll ...
- *
- *   svc_mgr.destroyService(svc_h);
- * @endcode
+ * The service manager is a pure factory: it creates and destroys nixlServiceH
+ * instances that are thin wrappers around the underlying plugin engine.
  */
 class nixlServiceManager {
 public:
@@ -137,26 +147,33 @@ public:
     nixl_status_t getAvailPlugins(std::vector<nixl_service_t> &plugins);
 
     /**
-     * @brief Get the default initialization parameters for a service plugin.
+     * @brief Get the default initialization parameters and supported memory types
+     *        for a service plugin.
      * @param type   Service type string (e.g., "kvtc").
+     * @param mems   [out] Supported input/output memory types for the service.
      * @param params [out] Map of parameter name → default value.
      * @return NIXL_SUCCESS, or NIXL_ERR_NOT_FOUND if the plugin is unknown.
      */
-    nixl_status_t getPluginParams(const nixl_service_t &type, nixl_s_params_t &params);
+    nixl_status_t getPluginParams(const nixl_service_t &type,
+                                  nixl_service_mems_t  &mems,
+                                  nixl_s_params_t      &params);
 
     /**
      * @brief Instantiate a service engine and return a handle to the caller.
      *
      * The caller owns the returned handle and must call destroyService() when done.
      * The handle must remain valid for the lifetime of all transfer requests that
-     * reference it.
+     * reference it. No progress threads are started here; those are managed by
+     * the agent via service_enable_pt / service_progress_threads in nixlAgentConfig.
      *
      * @param type   Service type string.
+     * @param mems   Requested input/output memory types (validated against plugin support).
      * @param params Initialization parameters (from getPluginParams, customized).
      * @param handle [out] Pointer to the created service handle.
      * @return NIXL_SUCCESS, or an error code on failure.
      */
-    nixl_status_t createService(const nixl_service_t &type,
+    nixl_status_t createService(const nixl_service_t  &type,
+                                const nixl_service_mems_t &mems,
                                 const nixl_s_params_t &params,
                                 nixlServiceH *&handle);
 

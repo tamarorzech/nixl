@@ -56,6 +56,22 @@ class nixlAgentConfig {
         uint64_t lthrDelay;
 
         /**
+         * @var Enable agent-level service progress threads.
+         *      When true and service_progress_threads > 0, the agent starts a pool of
+         *      background threads that drive all pending service requests via non-blocking
+         *      poll() calls and perform the fluent handoff to the backend on completion.
+         *      When false, getXferStatus() drives poll() inline on each user call.
+         */
+        bool service_enable_pt = true;
+
+        /**
+         * @var Number of service progress threads in the agent's PT pool.
+         *      Threads are shared across all services and requests owned by this agent.
+         *      Only used when service_enable_pt is true.
+         */
+        int service_progress_threads = 1;
+
+        /**
          * @var ETCD watch timeout in microseconds
          *      Timeout for waiting for metadata changes when watching etcd keys.
          */

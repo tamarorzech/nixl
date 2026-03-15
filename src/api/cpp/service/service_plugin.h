@@ -44,8 +44,9 @@ public:
     // Function to get service options
     nixl_b_params_t (*get_service_options)();
 
-    // Function to get supported service mem types
-    nixl_mem_list_t (*get_service_mems)();
+    // Functions to get supported input and output memory types separately
+    nixl_mem_list_t (*get_input_mems)();
+    nixl_mem_list_t (*get_output_mems)();
 };
 
 // Macro to define exported C functions for the service plugin
@@ -59,12 +60,14 @@ public:
            const char *name,
            const char *version,
            const nixl_b_params_t &params,
-           const nixl_mem_list_t &mem_list) {
+           const nixl_mem_list_t &input_mems,
+           const nixl_mem_list_t &output_mems) {
 
         static const char *plugin_name = name;
         static const char *plugin_version = version;
         static const nixl_b_params_t plugin_params = params;
-        static const nixl_mem_list_t plugin_mems = mem_list;
+        static const nixl_mem_list_t plugin_input_mems = input_mems;
+        static const nixl_mem_list_t plugin_output_mems = output_mems;
 
         static nixlServicePlugin plugin_instance = {api_version,
                                                     createEngine,
@@ -72,7 +75,8 @@ public:
                                                     []() { return plugin_name; },
                                                     []() { return plugin_version; },
                                                     []() { return plugin_params; },
-                                                    []() { return plugin_mems; }};
+                                                    []() { return plugin_input_mems; },
+                                                    []() { return plugin_output_mems; }};
 
         return &plugin_instance;
     }

@@ -106,6 +106,55 @@ class nixlAgent {
         createBackend (const nixl_backend_t &type,
                        const nixl_b_params_t &params,
                        nixlBackendH* &backend);
+
+        /*** Service Plugin Methods ***/
+
+        /**
+         * @brief  Discover the available service plugins found in the service plugin paths.
+         *
+         * @param  plugins [out] Vector of available service plugin names
+         * @return nixl_status_t Error code if call was not successful
+         */
+        nixl_status_t
+        getAvailServicePlugins(std::vector<nixl_service_t> &plugins);
+
+        /**
+         * @brief  Get the supported memory types and default init parameters for a service plugin.
+         *
+         * @param  type          Service plugin type (e.g., "kvtc")
+         * @param  mems [out]    Supported input/output memory types for the service
+         * @param  params [out]  Default init parameters and their values for the service
+         * @return nixl_status_t Error code if call was not successful
+         */
+        nixl_status_t
+        getServicePluginParams(const nixl_service_t &type,
+                               nixl_service_mems_t  &mems,
+                               nixl_s_params_t      &params) const;
+
+        /**
+         * @brief  Instantiate a service engine and register it with this agent.
+         *
+         * The agent owns the returned handle for its lifetime. The caller may store
+         * the pointer and pass it via nixl_opt_args_t::serviceH when creating
+         * transfer requests. The handle is destroyed automatically when the agent
+         * is destroyed.
+         *
+         * The mems parameter specifies which input/output memory types the caller
+         * intends to use with this service instance. It is validated against what
+         * the plugin supports (from getServicePluginParams); an error is returned
+         * if any requested type is not supported.
+         *
+         * @param  type          Service type string (e.g., "kvtc")
+         * @param  mems          Requested input/output memory types
+         * @param  params        Initialization parameters (from getServicePluginParams, customized)
+         * @param  handle [out]  Pointer to the created service handle (agent-owned)
+         * @return nixl_status_t Error code if call was not successful
+         */
+        nixl_status_t
+        addService(const nixl_service_t      &type,
+                   const nixl_service_mems_t &mems,
+                   const nixl_s_params_t     &params,
+                   nixlServiceH*             &handle);
         /**
          * @brief  Register a memory/storage with NIXL. If a list of backends hints is provided
          *         (via extra_params), the registration is limited to the specified backends.
@@ -228,17 +277,16 @@ class nixlAgent {
          *         provided (via extra_params), the selection is limited to the specified backends.
          *         Optionally, a notification message can also be provided through extra_params.
          *
+         *         To attach a service, set extra_params->serviceH to a handle obtained from
+         *         nixlAgent::addService(). Optionally set extra_params->serviceMd for per-request
+         *         metadata forwarded to the service engine.
+         *
          * @param  operation      Operation for transfer (e.g., NIXL_WRITE)
          * @param  local_descs    Local descriptor list
          * @param  remote_descs   Remote (or loopback) descriptor list
          * @param  remote_agent   Remote (or self) agent name for accessing the remote (local) data
          * @param  req_hndl [out] Transfer request handle output
-         * @param  extra_params   Optional extra parameters used in creating a transfer request
-         * @param  service_h      Optional service handle created by nixlServiceManager::createService().
-         *                        If provided, the service processes data in-place before the backend
-         *                        transfer begins. Must remain valid for the lifetime of the request.
-         *                        Agent does not take ownership.
-         * @param  service_meta   Optional key-value metadata passed to the service for this request
+         * @param  extra_params   Optional extra parameters; set serviceH / serviceMd to attach a service
          * @return nixl_status_t  Error code if call was not successful
          */
         nixl_status_t
@@ -247,9 +295,7 @@ class nixlAgent {
                        const nixl_xfer_dlist_t &remote_descs,
                        const std::string &remote_agent,
                        nixlXferReqH* &req_hndl,
-                       const nixl_opt_args_t* extra_params = nullptr,
-                       nixlServiceH* service_h = nullptr,
-                       const nixl_s_params_t* service_meta = nullptr) const;
+                       const nixl_opt_args_t* extra_params = nullptr) const;
 
         /*** Operations on prepared Transfer Request ***/
 

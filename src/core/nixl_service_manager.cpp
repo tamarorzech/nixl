@@ -27,20 +27,25 @@ nixlServiceManager::getAvailPlugins(std::vector<nixl_service_t> &plugins) {
 }
 
 nixl_status_t
-nixlServiceManager::getPluginParams(const nixl_service_t &type, nixl_s_params_t &params) {
+nixlServiceManager::getPluginParams(const nixl_service_t &type,
+                                    nixl_service_mems_t  &mems,
+                                    nixl_s_params_t      &params) {
     auto &pm     = nixlPluginManager::getInstance();
     auto  handle = pm.loadServicePlugin(type);
     if (!handle) {
         NIXL_ERROR << "Service plugin not found: " << type;
         return NIXL_ERR_NOT_FOUND;
     }
-    params = handle->getServiceOptions();
+    params       = handle->getServiceOptions();
+    mems.input   = handle->getInputMems();
+    mems.output  = handle->getOutputMems();
     return NIXL_SUCCESS;
 }
 
 nixl_status_t
-nixlServiceManager::createService(const nixl_service_t &type,
-                                  const nixl_b_params_t &params,
+nixlServiceManager::createService(const nixl_service_t      &type,
+                                  const nixl_service_mems_t &mems,
+                                  const nixl_s_params_t     &params,
                                   nixlServiceH *&handle) {
     handle = nullptr;
 
@@ -53,6 +58,7 @@ nixlServiceManager::createService(const nixl_service_t &type,
 
     nixlServiceInitParams init_params;
     init_params.type         = type;
+    init_params.mems         = mems;
     init_params.customParams = &params;
 
     nixlServiceEngine *engine = plugin_h->createEngine(&init_params);

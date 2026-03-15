@@ -26,6 +26,10 @@ The service operates in-place on the DRAM buffer before/after each transfer:
   - WRITE: service processes the DRAM buffer in-place, then backend writes to file.
   - READ:  backend reads the file into the DRAM buffer, then service processes in-place.
 
+Service lifecycle is now managed directly through the agent:
+    agent.get_avail_service_plugins() / get_service_plugin_params() / add_service()
+The service handle is passed per-request via the service_h keyword argument.
+
 Usage:
     python nixl_service_example.py [--backend POSIX] [--service kvtc]
                                    [--dev-bdf 0000:81:00.0] [--server-name kvtc_demo]
@@ -40,7 +44,7 @@ import ctypes
 import os
 import sys
 
-from nixl._api import nixl_agent, nixl_agent_config, nixl_service_manager
+from nixl._api import nixl_agent, nixl_agent_config
 from nixl.logging import get_logger
 
 logger = get_logger(__name__)
@@ -164,26 +168,23 @@ def main():
     print("  FILE destination\n")
 
     # ----------------------------------------------------------------------- #
-    # Service setup via nixl_service_manager
+    # Service setup via the agent
     # ----------------------------------------------------------------------- #
-    svc_mgr = nixl_service_manager()
-
-    available_services = svc_mgr.get_avail_plugins()
+    available_services = agent.get_avail_service_plugins()
     print(f"Available service plugins : {available_services}")
 
     svc_h = None
     if args.service in available_services:
-        params = svc_mgr.get_plugin_params(args.service)
+        params, mems = agent.get_service_plugin_params(args.service)
+        print(f"  Supported mems : {mems}")
         params["dev_bdf"]     = args.dev_bdf
         params["server_name"] = args.server_name
 
-        svc_h = svc_mgr.create_service(args.service, params)
+        svc_h = agent.add_service(args.service, mems, params)
         if svc_h is None:
-            logger.warning("createService returned None; proceeding without service")
+            logger.warning("add_service returned None; proceeding without service")
         else:
-            print(f"Service '{args.service}' created (in-place)")
-            print(f"  Supported input  mems : {svc_h.getSupportedInputMems()}")
-            print(f"  Supported output mems : {svc_h.getSupportedOutputMems()}")
+            print(f"Service '{args.service}' added (in-place, agent-owned)")
     else:
         logger.warning(
             "Service '%s' not found (set NIXL_SERVICE_PLUGIN_DIR); "
@@ -202,7 +203,8 @@ def main():
     src_xfer = agent.get_xfer_descs([(src_addr, BUFFER_SIZE, 0)], "DRAM")
 
     write_handle = agent.initialize_xfer(
-        "WRITE", src_xfer, dst_xfer, "LocalAgent", service_h=svc_h
+        "WRITE", src_xfer, dst_xfer, "LocalAgent",
+        service_h=svc_h,
     )
     assert write_handle, "Failed to create WRITE transfer request"
 
@@ -252,10 +254,6 @@ def main():
     agent.deregister_memory(read_reg)
     agent.deregister_memory(src_reg)
     agent.deregister_memory(dst_reg)
-
-    if svc_h is not None:
-        svc_mgr.destroy_service(svc_h)
-        print("  Service destroyed")
 
     os.close(dst_fd)
     os.remove(DST_FILE)

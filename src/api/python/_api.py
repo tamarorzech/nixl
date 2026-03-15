@@ -119,28 +119,22 @@ nixl_backend_handle = int
 
 
 """
-@brief Manager for service plugin lifecycle.
+@brief Internal service plugin factory (deprecated for direct use).
 
-Wraps nixlServiceManager to provide discovery, instantiation, and destruction
-of service handles. A handle returned by create_service() must be passed to
-initialize_xfer(service_h=...) and eventually destroyed with destroy_service().
+Applications should use the agent's service API instead:
+    agent.get_avail_service_plugins()
+    agent.get_service_plugin_params(service_type)
+    agent.add_service(service_type, mems, params)
 
-Example usage:
-    svc_mgr = nixl_service_manager()
-    params = svc_mgr.get_plugin_params("kvtc")
-    params["dev_bdf"] = "0000:81:00.0"
-    svc_h = svc_mgr.create_service("kvtc", params)
-    req = agent.initialize_xfer("WRITE", local, remote, name, service_h=svc_h)
-    ...
-    svc_mgr.destroy_service(svc_h)
+This class is kept for internal use and backward compatibility.
 """
 
 
 class nixl_service_manager:
     """
-    @brief Python wrapper around nixlServiceManager.
+    @brief Internal wrapper around nixlServiceManager.
 
-    Manages service plugin discovery, instantiation, and destruction.
+    Kept for internal use. Use nixl_agent.add_service() instead.
     """
 
     def __init__(self):
@@ -159,7 +153,9 @@ class nixl_service_manager:
     @return dict of parameter name -> default value.
     """
 
-    def get_plugin_params(self, service_type: str) -> dict[str, str]:
+    def get_plugin_params(
+        self, service_type: str
+    ) -> tuple[dict[str, str], nixlBind.nixl_service_mems_t]:
         return self._mgr.getPluginParams(service_type)
 
     """
@@ -170,14 +166,18 @@ class nixl_service_manager:
     reference it.
 
     @param service_type Service type string (e.g. "kvtc").
+    @param mems         nixl_service_mems_t specifying input/output memory types.
     @param params       Initialization parameters (from get_plugin_params, customized).
     @return             nixlServiceH handle (opaque, pass to initialize_xfer).
     """
 
     def create_service(
-        self, service_type: str, params: dict[str, str]
+        self,
+        service_type: str,
+        mems: nixlBind.nixl_service_mems_t,
+        params: dict[str, str],
     ) -> nixlBind.nixlServiceH:
-        return self._mgr.createService(service_type, params)
+        return self._mgr.createService(service_type, mems, params)
 
     """
     @brief Destroy a service handle previously created by create_service().
@@ -618,6 +618,46 @@ class nixl_agent:
         return nixl_xfer_handle(self.agent, handle)
 
     """
+    @brief  Return list of available service plugin names.
+    """
+
+    def get_avail_service_plugins(self) -> list[str]:
+        return self.agent.getAvailServicePlugins()
+
+    """
+    @brief  Return default initialization parameters and supported memory types for a service plugin.
+    @param  service_type  Service type string (e.g. "kvtc").
+    @return (params dict, nixl_service_mems_t with input/output nixl_mem_t lists)
+    """
+
+    def get_service_plugin_params(
+        self, service_type: str
+    ) -> tuple[dict[str, str], nixlBind.nixl_service_mems_t]:
+        params, mems = self.agent.getServicePluginParams(service_type)
+        return params, mems
+
+    """
+    @brief  Instantiate a service engine and register it with this agent.
+
+    The agent owns the returned handle for its lifetime; it is destroyed automatically
+    when the agent is destroyed. The caller may pass the handle to initialize_xfer(service_h=...).
+
+    @param  service_type  Service type string (e.g. "kvtc").
+    @param  mems          nixl_service_mems_t specifying input/output memory types
+                          (validated against plugin support).
+    @param  params        Initialization parameters (from get_service_plugin_params, customized).
+    @return nixlServiceH handle (agent-owned; do not call destroy on it).
+    """
+
+    def add_service(
+        self,
+        service_type: str,
+        mems: nixlBind.nixl_service_mems_t = nixlBind.nixl_service_mems_t(),
+        params: dict[str, str] = {},
+    ) -> Optional[nixlBind.nixlServiceH]:
+        return self.agent.addService(service_type, mems, params)
+
+    """
     @brief  Initialize a transfer operation. This is a combined API, to create a transfer request
             from two descriptor lists, where NIXL prepares the descriptor lists and then the transfer.
             If there are common descriptors across different transfer requests, using
@@ -631,7 +671,7 @@ class nixl_agent:
     @param notif_msg Optional notification message.
            notif_msg should be bytes, as that is what will be returned to the target, but will work with str too.
     @param backends Optional list of backend names to limit which backends NIXL can use.
-    @param service_h    Optional nixlServiceH handle created by nixl_service_manager.create_service().
+    @param service_h    Optional nixlServiceH handle obtained from add_service().
     @param service_meta Optional dict of key-value metadata passed to the service for this request.
     @return Opaque handle for posting/checking transfer.
             The handle can be released by calling release_xfer_handle from agent, or release() method on itself.

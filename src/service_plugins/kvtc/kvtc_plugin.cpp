@@ -30,8 +30,10 @@ nixl_service_plugin_init() {
         // Define plugin parameters
         nixl_b_params_t params = {};
 
-        // Define supported memory types
-        nixl_mem_list_t mem_list = {DRAM_SEG};
+        // KVTC operates in-place: source buffers are DRAM and compressed
+        // output is written back to DRAM.
+        nixl_mem_list_t input_mems  = {DRAM_SEG};
+        nixl_mem_list_t output_mems = {DRAM_SEG};
 
         // Create the plugin using the template creator
         plugin_instance = nixlServicePluginCreator<nixlKvtcServiceEngine>::create(
@@ -39,7 +41,8 @@ nixl_service_plugin_init() {
             "kvtc",
             "1.0.0",
             params,
-            mem_list
+            input_mems,
+            output_mems
         );
     }
     return plugin_instance;

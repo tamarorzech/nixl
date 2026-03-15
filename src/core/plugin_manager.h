@@ -116,7 +116,8 @@ public:
     const char *
     getVersion() const override;
     nixl_b_params_t getServiceOptions() const;
-    nixl_mem_list_t getServiceMems() const;
+    nixl_mem_list_t getInputMems() const;
+    nixl_mem_list_t getOutputMems() const;
 
 private:
     nixlServicePlugin *plugin_;
