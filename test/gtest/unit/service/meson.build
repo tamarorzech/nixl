@@ -13,34 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-unit_test_deps = [
-    nixl_dep,
-    gtest_dep,
-]
-
-if is_variable('obj_backend_interface')
-    subdir('obj')
-    unit_test_deps += [obj_unit_test_dep]
-endif
-
-subdir('agent')
-unit_test_deps += [agent_unit_test_dep]
-
-subdir('service')
-unit_test_deps += [service_unit_test_dep]
-
-unit_test_exe = executable('unit',
-    sources : [
-        'main.cpp',
+service_unit_test_dep = declare_dependency(
+    sources: [
+        'service_manager.cpp',
     ],
-    cpp_args : cpp_args,
-    dependencies : unit_test_deps,
-    include_directories: [
-        nixl_inc_dirs,
-        utils_inc_dirs,
-    ],
-    link_with: [nixl_build_lib],
-    install : true
+    include_directories: [nixl_inc_dirs, gtest_inc_dirs],
+    dependencies: [gmock_dep, nixl_common_dep],
 )
-
-test('unit', unit_test_exe)

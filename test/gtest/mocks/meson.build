@@ -28,5 +28,16 @@ run_command('sh', '-c',
                 check: true
             )
 
+mock_service_plugin = shared_library('MOCK_SERVICE', 'mock_service_plugin.cpp',
+               dependencies: [nixl_infra, nixl_common_dep],
+               include_directories: [nixl_inc_dirs, utils_inc_dirs, gtest_inc_dirs],
+               name_prefix: 'libservice_plugin_',
+               install: true,
+               install_dir: service_plugin_install_dir)
+run_command('sh', '-c',
+            'echo "MOCK_SERVICE=' + mock_service_plugin.full_path() + '" >> ' + plugin_build_dir + '/service_pluginlist',
+                check: true
+            )
+
 source_root = meson.project_source_root()
 mocks_dep = declare_dependency(variables : {'path' : meson.current_source_dir().split(source_root + '/')[1]})

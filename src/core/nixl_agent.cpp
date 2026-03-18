@@ -154,9 +154,6 @@ nixlAgentData::nixlAgentData(const std::string &name, const nixlAgentConfig &cfg
 // Service progress loop: polls all pending service requests and fires the
 // fluent backend handoff (postXfer) the moment poll() signals completion.
 void nixlAgentData::svcProgressLoop() {
-    const auto tid = std::this_thread::get_id();
-    std::cout << "[svc-agent-pt " << tid << "] started\n";
-
     static constexpr auto POLL_INTERVAL = std::chrono::milliseconds(1);
 
     while (!svcProgStop_.load(std::memory_order_relaxed)) {
@@ -172,8 +169,6 @@ void nixlAgentData::svcProgressLoop() {
                 nixlXferReqH *req = *it;
                 nixl_status_t s = req->service_h->poll(req->svc_req_, req->out_descs_);
                 if (s != NIXL_IN_PROG) {
-                    std::cout << "[svc-agent-pt " << tid << "] svc_req="
-                              << req->svc_req_ << " done (status=" << s << ")\n";
                     to_fire.emplace_back(s, req);
                     it = svcPending_.erase(it);
                 } else {
@@ -185,8 +180,6 @@ void nixlAgentData::svcProgressLoop() {
         // Fluent handoff: outside svcPendingLock_ to avoid nested locking with
         // the agent shared lock acquired inside postXfer().
         for (auto &[svc_status, req] : to_fire) {
-            std::cout << "[svc-agent-pt " << tid
-                      << "] handoff for svc_req=" << req->svc_req_ << "\n";
             if (svc_status < 0) {
                 NIXL_ERROR << "Service: work failed (" << svc_status << ")";
                 req->svc_post_result_ = NIXL_ERR_BACKEND;
@@ -228,7 +221,6 @@ void nixlAgentData::svcProgressLoop() {
             std::this_thread::sleep_for(POLL_INTERVAL);
     }
 
-    std::cout << "[svc-agent-pt " << tid << "] stopped\n";
 }
 
 nixlAgentData::~nixlAgentData() {
