@@ -80,24 +80,34 @@ void printServiceMems(const nixl_service_mems_t& mems) {
     printList("output", mems.output);
 }
 
-// Structure to hold parsed command-line arguments
 struct ProgramArgs {
     std::string backend;
+    bool      enable_dpu_manager = false;
+    std::string dpu_dev_bdf;
+    std::string dpu_server_name;
 };
 
 ProgramArgs parseArguments(int argc, char **argv) {
     ProgramArgs args;
     args.backend = "POSIX";
 
-    if (argc > 1) {
-        std::string arg1 = argv[1];
-        if (arg1 == "-h" || arg1 == "--help") {
-            std::cout << "Usage: " << argv[0] << " [BACKEND]\n";
-            std::cout << "  BACKEND: Backend name (default: POSIX)\n";
-            std::cout << "\nService plugin always operates in-place.\n";
+    for (int i = 1; i < argc; ++i) {
+        std::string arg = argv[i];
+        if (arg == "-h" || arg == "--help") {
+            std::cout << "Usage: " << argv[0]
+                      << " [BACKEND] [--dpu-bdf BDF --dpu-server NAME]\n"
+                      << "  BACKEND:      Backend name (default: POSIX)\n"
+                      << "  --dpu-bdf:    PCIe BDF of the DPU (enables DPU manager)\n"
+                      << "  --dpu-server: DOCA Comm Channel server name on the DPU\n";
             exit(0);
+        } else if (arg == "--dpu-bdf" && i + 1 < argc) {
+            args.dpu_dev_bdf = argv[++i];
+            args.enable_dpu_manager = true;
+        } else if (arg == "--dpu-server" && i + 1 < argc) {
+            args.dpu_server_name = argv[++i];
+        } else if (arg[0] != '-') {
+            args.backend = arg;
         }
-        args.backend = arg1;
     }
 
     return args;
@@ -218,7 +228,7 @@ void registerMemory(nixlAgent& agent,
 
 // Create a service handle using the agent's service API
 nixlServiceH* createService(nixlAgent& agent) {
-    nixl_service_t service_type = "kvtc";
+    nixl_service_t service_type = "generic_dpu";
 
     std::cout << "Creating service via nixlAgent...\n";
 
@@ -238,8 +248,7 @@ nixlServiceH* createService(nixlAgent& agent) {
         printServiceMems(mems);
     }
 
-    params["dev_bdf"]     = "0000:81:00.0";
-    params["server_name"] = "kvtc_demo";
+    params["service_type"] = "kvtc";
 
     nixlServiceH* svc_h = nullptr;
     ret = agent.addService(service_type, mems, params, svc_h);
@@ -405,16 +414,15 @@ int main(int argc, char **argv) {
     // The agent's PT pool is shared across all services and requests.
     // Set service_enable_pt=false to fall back to external polling
     // (getXferStatus drives poll() on each user call instead).
-    nixlAgentConfig cfg(true); // enable backend progress thread
-    cfg.service_enable_pt        = true; // enable agent-owned service PT pool
-    cfg.service_progress_threads = 1;    // one service progress thread
+    nixlAgentConfig cfg(true);
+    cfg.service_enable_pt        = true;
+    cfg.service_progress_threads = 1;
 
-    std::cout << "Service progress thread: "
-              << (cfg.service_enable_pt
-                      ? "ENABLED (agent-owned, " +
-                            std::to_string(cfg.service_progress_threads) + " thread(s))"
-                      : "DISABLED (external polling via getXferStatus)")
-              << "\n\n";
+    if (args.enable_dpu_manager) {
+        cfg.service_enable_dpu_manager = true;
+        cfg.dpu_dev_bdf      = args.dpu_dev_bdf;
+        cfg.dpu_server_name  = args.dpu_server_name;
+    }
 
     nixlAgent agent(agent_name, cfg);
     nixl_opt_args_t extra_params;

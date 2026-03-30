@@ -149,6 +149,12 @@ nixlAgentData::nixlAgentData(const std::string &name, const nixlAgentConfig &cfg
         telemetryEnabled = true;
         NIXL_DEBUG << "Capturing NIXL telemetry based on config (without an output file)";
     }
+
+#if HAVE_DPU_MANAGER
+    if (cfg.service_enable_dpu_manager) {
+        svcManager_.connectDpuManager(cfg.dpu_dev_bdf, cfg.dpu_server_name);
+    }
+#endif
 }
 
 // Service progress loop: polls all pending service requests and fires the

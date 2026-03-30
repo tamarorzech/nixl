@@ -17,6 +17,10 @@ if enabled_plugins.get('KVTC')
     subdir('kvtc')
 endif
 
+if not is_disabler(dpu_manager_dep)
+    subdir('generic_dpu')
+endif
+
 # Create a unified service_plugins directory for easier discovery during development
 unified_service_plugins_dir = meson.current_build_dir() / '../core/service_plugins'
 service_plugins_src_dir = meson.current_build_dir()

@@ -72,6 +72,20 @@ class nixlAgentConfig {
         int service_progress_threads = 1;
 
         /**
+         * @var Enable DPU manager for service offload.
+         *      When true, the agent connects a HostClient to the DPU at
+         *      construction and routes service requests through the
+         *      generic_dpu plugin. Requires dpu_dev_bdf and dpu_server_name.
+         */
+        bool service_enable_dpu_manager = false;
+
+        /** @var PCIe BDF of the DPU device (e.g. "03:00.0"). */
+        std::string dpu_dev_bdf;
+
+        /** @var DOCA Comm Channel server name on the DPU. */
+        std::string dpu_server_name;
+
+        /**
          * @var ETCD watch timeout in microseconds
          *      Timeout for waiting for metadata changes when watching etcd keys.
          */

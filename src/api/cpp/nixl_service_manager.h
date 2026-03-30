@@ -18,12 +18,18 @@
 #ifndef _NIXL_SERVICE_MANAGER_H
 #define _NIXL_SERVICE_MANAGER_H
 
+#include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
 #include "nixl_types.h"
 #include "nixl_descriptors.h"
 #include "service/service_engine.h"
+
+#if HAVE_DPU_MANAGER
+class HostClient;
+#endif
 
 /**
  * @class nixlServiceH
@@ -130,8 +136,19 @@ private:
  */
 class nixlServiceManager {
 public:
-    nixlServiceManager()  = default;
-    ~nixlServiceManager() = default;
+    nixlServiceManager();
+    ~nixlServiceManager();
+
+#if HAVE_DPU_MANAGER
+    /**
+     * @brief Construct and immediately connect a HostClient to the DPU.
+     *
+     * @param dev_bdf     PCIe BDF of the DPU device (e.g. "03:00.0").
+     * @param server_name DOCA Comm Channel server name on the DPU.
+     */
+    void connectDpuManager(const std::string &dev_bdf,
+                           const std::string &server_name);
+#endif
 
     // Non-copyable, non-movable
     nixlServiceManager(const nixlServiceManager &)            = delete;
@@ -182,6 +199,17 @@ public:
      * @param handle Handle to destroy. Set to nullptr after destruction.
      */
     void destroyService(nixlServiceH *&handle);
+
+#if HAVE_DPU_MANAGER
+    HostClient* getHostClient() { return hostClient_.get(); }
+    std::mutex& getHostClientMutex() { return hostClientMutex_; }
+
+private:
+    std::unique_ptr<HostClient> hostClient_;
+    std::mutex hostClientMutex_;
+    std::string devBdf_;
+    std::string serverName_;
+#endif
 };
 
 #endif // _NIXL_SERVICE_MANAGER_H

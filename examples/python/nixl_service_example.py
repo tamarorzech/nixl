@@ -179,6 +179,7 @@ def main():
         print(f"  Supported mems : {mems}")
         params["dev_bdf"]     = args.dev_bdf
         params["server_name"] = args.server_name
+        params["service_type"] = "kvtc"
 
         svc_h = agent.add_service(args.service, mems, params)
         if svc_h is None:
