@@ -402,14 +402,17 @@ void dispatch(void* packed_recv_x, void* packed_recv_x_scales,
               void* workspace, int num_device_sms,
               cudaStream_t stream, int phases, ep_kernels::gpu_nixl_ctx nixl_ctx) {
     constexpr int kNumMaxTopK = 11;
-    const int num_warp_groups = ceil_div(num_experts, num_device_sms);
+    // Override: Use only 32 SMs for dispatch/send phase
+    const int dispatch_num_sms = 32;
+    const int num_warp_groups = ceil_div(num_experts, dispatch_num_sms);
     const int num_warps_per_group = 32 / num_warp_groups;
     EP_HOST_ASSERT(num_warp_groups > 0 and num_warps_per_group > 0);
     EP_HOST_ASSERT(kNumMaxTopK + 1 <= num_warp_groups * num_warps_per_group);
 
     const auto num_warps = num_warp_groups * num_warps_per_group;
-    const auto num_sms = ceil_div(num_experts, num_warp_groups);
+    const auto num_sms = dispatch_num_sms;
     EP_HOST_ASSERT(num_topk <= kNumMaxTopK);
+    // printf("dispatch: num_sms = %d\n", num_sms);
 
     // Workspace checks
     auto atomic_counter_per_expert = static_cast<int*>(workspace);
